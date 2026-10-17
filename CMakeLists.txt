@@ -32,6 +32,19 @@ if (MSVC)
   set_property(TARGET fft_test PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+# Diagnostic only (off by default): a bare pass-through filter. It was used to
+# track down a memory-retention bug — a filter must release its dependency node
+# with freeNode() in its free callback. See docs/validation-staxrip.md.
+option(FFT3DCL_BUILD_TESTPLUGIN "Build the diagnostic pass-through plugin" OFF)
+if (FFT3DCL_BUILD_TESTPLUGIN)
+  add_library(tstplugin SHARED tools/testplugin/testplugin.cpp)
+  target_include_directories(tstplugin PRIVATE third_party/vapoursynth)
+  if (MSVC)
+    target_compile_options(tstplugin PRIVATE /W4 /EHsc /utf-8)
+    set_property(TARGET tstplugin PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  endif()
+endif()
+
 add_executable(clinfo tools/clinfo.cpp)
 if (MSVC)
   target_compile_options(clinfo PRIVATE /W4 /utf-8)

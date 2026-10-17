@@ -11,6 +11,7 @@
 #include "cpu/reference.h"
 #include "cl/gpu.h"
 
+#include <cstdio>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -45,6 +46,7 @@ struct FilterInstance {
   std::vector<std::map<int, std::shared_ptr<PlaneRef::Spectra>>> cache;
   std::vector<bool> degridDone;
   std::mutex mtx; // guards cache, refs scratch, degrid init
+  bool gpuWarned = false; // one core-log warning if the GPU path gives up
 };
 
 const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instanceData,
@@ -62,6 +64,17 @@ void VS_CC fft3dclCreate(const VSMap* in, VSMap* out, void* userData, VSCore* co
     vsapi->mapSetError(out, "FFT3DCL: a video clip must be specified as the 'clip' argument");
     return;
   }
+  // Until createVideoFilter takes over, this function owns the reference to the
+  // input node: release it on every error path (see the VapourSynth skeleton).
+  struct NodeGuard {
+    const VSAPI* vsapi;
+    VSNode* node;
+    bool owned = true;
+    ~NodeGuard() {
+      if (owned && node)
+        vsapi->freeNode(node);
+    }
+  } nodeGuard{vsapi, clip};
   const VSVideoInfo* srcvi = vsapi->getVideoInfo(clip);
   if (!vsh::isConstantVideoFormat(srcvi) ||
       (srcvi->format.numPlanes != 1 && srcvi->format.numPlanes != 3)) {
@@ -195,8 +208,10 @@ void VS_CC fft3dclCreate(const VSMap* in, VSMap* out, void* userData, VSCore* co
   // Kalman (bt=0) is stateful: fmFrameState delivers frames in order, one at a
   // time — same sequential semantics as the original MT_SERIALIZED filter.
   int fm = (sp.bt == 0) ? fmFrameState : fmParallelRequests;
+  FilterInstance* raw = inst.release();
   vsapi->createVideoFilter(out, "FFT3DCL", srcvi, fft3dclGetFrame, fft3dclFree, fm,
-                           deps, 1, inst.release(), core);
+                           deps, 1, raw, core);
+  nodeGuard.owned = false; // the graph now owns the dependency reference
 }
 
 // ---- getframe -------------------------------------------------------------
@@ -294,6 +309,13 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
       if (!gpu.process(window, outPlane)) {
         // Driver/OOM failure: disable GPU and fall through to the CPU path.
         inst->useGpu = false;
+        if (!inst->gpuWarned) {
+          inst->gpuWarned = true;
+          char msg[128];
+          snprintf(msg, sizeof(msg),
+                   "FFT3DCL: OpenCL processing failed at frame %d, continuing on the CPU path", n);
+          vsapi->logMessage(mtWarning, msg, core);
+        }
       } else {
         ref.download(outPlane, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
 
@@ -349,7 +371,9 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
 }
 
 void VS_CC fft3dclFree(void* instanceData, VSCore* core, const VSAPI* vsapi) {
-  delete static_cast<FilterInstance*>(instanceData);
+  FilterInstance* inst = static_cast<FilterInstance*>(instanceData);
+  vsapi->freeNode(inst->clip); // we own the dependency reference: give it back
+  delete inst;
 }
 
 } // namespace

@@ -90,3 +90,67 @@ figures):
   `core.fft3dcl.FFT3DCL(clip, ...)`.
 - The plugin registers itself as API R4.3 and loads correctly on an R4.2 core;
   it only calls functions that exist since API 4.0.
+
+## Memory retention across previews (fixed)
+
+### Report
+
+Opening and closing a StaxRip preview repeatedly made the memory of the
+`vspipe` process grow without ever coming back: about **830 MB per cycle** on
+3840x2160 YUV420P10, while GPU memory stayed small. The same growth appeared
+with BestSource (VapourSynth R81) and with L-SMASH (R79), in both the GPU and
+the CPU path.
+
+### How it was isolated
+
+1. The filter's own buffers are released correctly: instrumenting the instance
+   showed 410 MB of CPU scratch alive at teardown and 0 KB right after the
+   instance was deleted, yet the process kept the 830 MB.
+2. The growth did not depend on the number of frames, on `bt`, on `degrid`, on
+   `sharpen`, on the frame mode, on the request pattern, or on the CRT linkage.
+3. A 40-line pass-through plugin written from the official VapourSynth skeleton
+   reproduced the same 830 MB per cycle; a well-behaved third-party temporal
+   filter (`focus2.TemporalSoften2`) in the same process did not.
+4. Diffing the two: the skeleton releases the input node in its free callback
+   (`vsapi->freeNode(d->node)`), our filter did not.
+
+### Root cause
+
+In VapourSynth API 4 the filter **owns the reference to its dependency node**
+and must return it in the free callback. We stored the node pointer but never
+called `freeNode`, so the source node was never destroyed: its decoder and its
+decoded-frame cache stayed in memory for the life of the process. Every new
+script (every preview) added another one. This is also what produced the
+`Core freed but N filter instance(s) still exist` message at shutdown.
+
+### Fix
+
+- `fft3dclFree` now calls `vsapi->freeNode(inst->clip)` before deleting the
+  instance.
+- `fft3dclCreate` wraps the reference in a small guard so that every error path
+  (bad format, bad plane, invalid parameters) releases it too; the guard is
+  disarmed once `createVideoFilter` has taken ownership.
+
+### Verification
+
+Private committed memory retained per create/render/destroy cycle, 4K clip:
+
+| Environment | Before | After |
+|---|---|---|
+| VapourSynth R81 + BestSource, `device=2` | +833, +832 MiB | +0.6, +0.6 MiB |
+| VapourSynth R81 + BestSource, `device=0` | +834, +832 MiB | -0.1, +0.6 MiB |
+| StaxRip R79 + L-SMASH, `device=0` | +804, +801 MiB | +2.0, +2.4 MiB |
+
+Pixels are unchanged: the previous build and the fixed one render
+**100 % identical** output (max diff 0) for the default parameters, `bt=4
+sharpen=0.4`, `bt=0`, `plane=4` and `mode=0`. The StaxRip R79 matrix (`bt=-1`,
+`bt=0`, `bt=4` at the start, middle and end of the clip, a single frame,
+`device=1`, `device=0`, `plane=4`) still exits 0, and the shutdown warning is
+gone.
+
+### Remaining footprint (not a leak)
+
+A single 4K instance still peaks near 2.1 GB of private memory: roughly 410 MB
+of CPU scratch that the `PlaneRef` object allocates even when the OpenCL path
+is used, plus the OpenCL buffers and VapourSynth's frame cache. That memory is
+now released properly; shrinking it is a separate optimisation.
