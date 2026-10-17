@@ -98,6 +98,20 @@ The resulting DLL is `build/Release/fft3dcl.dll`.
 
 ---
 
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/` | the plugin: VapourSynth entry point, CPU reference, OpenCL backend |
+| `docs/` | parameter contract, porting map, validation reports, and the cartography notes of the original plugin |
+| `tools/` | test harness (reference render vs port render, sample-by-sample diff) |
+| `release/fft3dcl/` | ready-to-install DLL, install guide and sample script |
+| `upstream/` | the original [pinterf/FFT3dGPU](https://github.com/pinterf/FFT3dGPU) v0.8.6 sources (Avisynth + Direct3D 9), unmodified |
+| `archive/fr/` | French originals of the translated documents |
+| `third_party/` | VapourSynth API headers used for the build |
+
+---
+
 ## Intentional differences from the original
 
 Full list in [`docs/porting-map.md`](docs/porting-map.md). The main ones:

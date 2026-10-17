@@ -1,7 +1,7 @@
 # FFT3dGPU — Exhaustive technical documentation of the FFT implementation
 
 > Document prepared for the OpenCL port of the AviSynth **FFT3dGPU** plugin (DirectX 9).
-> Source root: `FFT3dGPU\FFT3dGPU`. All references are `file:line`.
+> Source root: `upstream\FFT3dGPU\FFT3dGPU`. All references are `file:line`.
 > The HLSL/C formulas are copied **verbatim** (original indentation preserved in the code blocks).
 > Analysis date: 2026-10-17. No source file was modified.
 

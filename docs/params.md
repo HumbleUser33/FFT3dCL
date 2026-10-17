@@ -1,6 +1,6 @@
 # FFT3DGPU v0.8.6 — parameter specification (extracted from source)
 
-Source of truth: `FFT3dGPU/FFT3dGPU/FFT3dGPU.cpp` (Create_fft3dGPU line 1233, constructor line 163),
+Source of truth: `upstream/FFT3dGPU/FFT3dGPU/FFT3dGPU.cpp` (Create_fft3dGPU line 1233, constructor line 163),
 `documentation/fft3dgpu.htm`. These names, defaults and semantics are the contract for the port.
 
 AviSynth registration (FFT3dGPU.cpp:1359):

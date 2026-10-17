@@ -1,6 +1,6 @@
 # FFT3dGPU — Exhaustive technical documentation of the CPU classes driving the HLSL pixel shaders (OpenCL port)
 
-Sources analysed: `FFT3dGPU/FFT3dGPU/filtersps.h` (418 lines), `filtersps.cpp` (2100 lines), `filters.h` (126 lines), `filters.cpp` (1001 lines), `fft3dgpu.hlsl` (1205 lines), `FFT3dGPU.cpp/.h`, `core/shader.{h,cpp}`, `core/texture.{h,cpp}`, `core/vertexbuffer.{h,cpp}`, `core/ManageDirect3DWindow.cpp`.
+Sources analysed: `upstream/FFT3dGPU/FFT3dGPU/filtersps.h` (418 lines), `filtersps.cpp` (2100 lines), `filters.h` (126 lines), `filters.cpp` (1001 lines), `fft3dgpu.hlsl` (1205 lines), `FFT3dGPU.cpp/.h`, `core/shader.{h,cpp}`, `core/texture.{h,cpp}`, `core/vertexbuffer.{h,cpp}`, `core/ManageDirect3DWindow.cpp`.
 All references are `file:line`.
 
 ---
