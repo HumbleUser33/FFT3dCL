@@ -37,3 +37,6 @@ tools/_*
 # --- Stray timecode files created by test scripts ---
 /1
 /8
+
+# Local clone of the upstream reference (kept out of the repo)
+/_upstream_ref_FFT3dGPU/
