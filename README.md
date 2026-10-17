@@ -1,4 +1,4 @@
-# FFT3dOpenCL
+# FFT3DCL
 
 Modern port of **FFT3dGPU v0.8.6** (an Avisynth+-only, Direct3D 9 filter) to a
 **native VapourSynth (API 4) plugin**, with an **OpenCL 1.2** backend that runs
@@ -63,6 +63,40 @@ All original parameters are accepted:
 `precision`, `degrid`, `scutoff`, `svr`, `smin`, `smax`, `kratio`, `ow`, `oh`,
 `wintype`, `interlaced`, `sigma2`, `sigma3`, `sigma4`, `oldfft`.
 
+Every option, with its default and what it does:
+
+```python
+clip = core.fft3dcl.FFT3DCL(
+    clip,
+    sigma=2.0,      # denoising strength (Wiener noise level, same units at any bit depth)
+    beta=1.0,       # over-subtraction factor; 1.0 = plain Wiener
+    bt=3,           # temporal window: -1 sharpen only, 0 Kalman, 1 2D,
+                    # 2 current+previous, 3 prev+current+next, 4 two prev+current+next
+    plane=0,        # 0 = luma, 1 = chroma, 4 = all
+    mode=1,         # 0 = 1:1 blocks, 1 = half-block overlap (uses ow/oh), 2 = not ported
+    bw=32, bh=32,   # block size, power of two, 4..512 (other values round down)
+    ow=16, oh=16,   # block overlap, mode 1 only, must be even, at most bw/2 and bh/2
+    degrid=1.0,     # block-grid removal, mode 1 only (default 1.0 in mode 1, else 0)
+    sharpen=0.0,    # positive sharpens, negative blurs, applied in the frequency domain
+    scutoff=0.3,    # sharpen cutoff (Gaussian in the frequency domain)
+    svr=1.0,        # sharpen volume
+    smin=4.0,       # sharpen minimum strength
+    smax=20.0,      # sharpen maximum strength
+    kratio=2.0,     # Kalman reset threshold (used with bt=0)
+    bordersize=1,     # border around blocks, mode 2 only (mode 2 is not ported)
+    precision=0,      # storage: 0 half, 1 mixed, 2 float; forced to 2 above 8-bit
+    wintype=0,        # window function in mode 1: 0 half-cosine, 1 sqrt-cos, 2 raised-cosine
+    sigma2=2.0,       # sigma at the highest frequencies; setting any of sigma2/3/4
+    sigma3=2.0,       # to a value different from sigma enables the noise-pattern mode
+    sigma4=2.0,       # sigma at the lowest frequencies
+    oldfft=0,         # FFT implementation choice (accepted, no effect on the result)
+)
+```
+
+Two parameters behave slightly differently here: `interlaced` is accepted but
+rejected with an error (not ported yet), and `precision` only selects the
+storage format — the arithmetic is 32-bit float everywhere.
+
 One parameter specific to this port, **with no effect on the denoising**:
 
 | `device` | Behaviour |
@@ -73,6 +107,9 @@ One parameter specific to this port, **with no effect on the denoising**:
 
 Accepted formats: 8 to 16-bit integer and 32-bit float, greyscale or planar YUV
 (10-bit HDR10 works).
+
+The full contract, with the exact clamping rules of the original, is in
+[`docs/params.md`](docs/params.md).
 
 ---
 
