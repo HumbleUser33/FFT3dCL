@@ -111,8 +111,12 @@ Full list in [`docs/porting-map.md`](docs/porting-map.md). The main ones:
 
 ---
 
-## Licence
+## License
 
 GNU GPL v2, like the original project
 [pinterf/FFT3dGPU](https://github.com/pinterf/FFT3dGPU), from which this port is
 derived.
+
+---
+
+Coded by Qwen 3.8 Flash Next IQ3_S, tested by a human
