@@ -12,7 +12,7 @@
 #include <memory>
 #include <vector>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 struct PlaneGeom {
   int width = 0, height = 0;
@@ -102,4 +102,4 @@ private:
   float chromaNorm_ = 0.0f; // CHROMANORM (mode 1 chroma only)
 };
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

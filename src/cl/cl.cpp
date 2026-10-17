@@ -2,7 +2,7 @@
 #include <windows.h>
 #include <cstring>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 bool ClApi::load() {
   if (ok_)
@@ -174,4 +174,4 @@ void GpuContext::shutdown() {
   device = nullptr;
 }
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

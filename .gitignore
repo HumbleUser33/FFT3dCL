@@ -13,7 +13,7 @@ CMakeFiles/
 env/
 
 # --- Upstream reference clone (pinterf/FFT3dGPU, kept locally for comparison) ---
-# Anchored at the repo root: an unanchored pattern also matches release/fft3dgpu/
+# Anchored at the repo root: an unanchored pattern also matches release/fft3dcl/
 # because gitignore is case-insensitive on Windows.
 /FFT3dGPU/
 

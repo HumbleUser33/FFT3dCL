@@ -26,7 +26,7 @@ $vpy = @"
 import vapoursynth as vs
 core = vs.core
 clip = core.bs.VideoSource(source=r"$clipFull")
-clip = core.fft3dgpu.FFT3DGPU(clip, precision=2$(if ($Params) { ", $Params" })$(if ($PortParams) { ", $PortParams" }))
+clip = core.fft3dcl.FFT3DCL(clip, precision=2$(if ($Params) { ", $Params" })$(if ($PortParams) { ", $PortParams" }))
 clip.set_output()
 "@
 Set-Content -Path tools\_port_tmp.vpy -Value $vpy -Encoding ASCII

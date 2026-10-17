@@ -1,8 +1,8 @@
 #pragma once
-// Parameter contract for FFT3DGPU, names/defaults/clamping identical to
+// Parameter contract for FFT3DCL, names/defaults/clamping identical to
 // FFT3dGPU v0.8.6 (FFT3dGPU.cpp:163-282, 1233-1303). See docs/params.md.
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 // Script-level parameters exactly as the user passes them.
 struct ScriptParams {
@@ -80,7 +80,7 @@ inline bool validateParams(const ScriptParams& sp, int width, int height,
   out.beta = sp.beta;
   out.bm = sp.bt;
   if (out.bm < -1 || out.bm > 4) {
-    *err = "FFT3DGPU: valid modes for bt are -1,0,1,2,3,4";
+    *err = "FFT3DCL: valid modes for bt are -1,0,1,2,3,4";
     return false;
   }
   out.bt = sp.bt > 0 ? sp.bt : 1;
@@ -121,11 +121,11 @@ inline bool validateParams(const ScriptParams& sp, int width, int height,
 
   // Block grid (FFT3dGPU.cpp:259-282). Mode 2 not ported yet.
   if (out.mode == 2) {
-    *err = "FFT3DGPU: mode 2 is not implemented yet in this port (use mode 0 or 1)";
+    *err = "FFT3DCL: mode 2 is not implemented yet in this port (use mode 0 or 1)";
     return false;
   }
   if (out.interlaced) {
-    *err = "FFT3DGPU: interlaced is not implemented yet in this port";
+    *err = "FFT3DCL: interlaced is not implemented yet in this port";
     return false;
   }
   if (out.mode == 0 || (out.bw == out.ow * 2 && out.bh == out.oh * 2)) {
@@ -147,4 +147,4 @@ inline bool validateParams(const ScriptParams& sp, int width, int height,
   return true;
 }
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

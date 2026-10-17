@@ -4,7 +4,7 @@
 #include <cmath>
 #include <complex>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 // DX9 MIRROR addressing for integer texel indices.
 static inline int mirror_i(int x, int w) {
@@ -427,4 +427,4 @@ void PlaneRef::filterAndSynthesize(const std::vector<std::shared_ptr<Spectra>>& 
       out[i] += chromaNorm_;
 }
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

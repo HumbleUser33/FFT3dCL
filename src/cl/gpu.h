@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 class GpuRef {
 public:
@@ -60,4 +60,4 @@ private:
   size_t wgFft_ = 0;
 };
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

@@ -1,7 +1,7 @@
 #pragma once
 #include <vector>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 // All tables are built in double and stored as float, like the original's
 // CPU tables uploaded to float textures.
@@ -32,4 +32,4 @@ std::vector<float> buildPattern(int bw, int bh, int bt, float sigma,
 std::vector<float> buildSharpenLUT(int bw, int bh, float strength, float svr,
                                    float scutoff);
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

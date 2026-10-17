@@ -2,7 +2,7 @@
 #include "kernels.h"
 #include <cstdio>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 static cl_mem mkBuf(GpuContext& c, cl_uint flags, size_t sz, const void* host) {
   cl_int e = 0;
@@ -312,4 +312,4 @@ void GpuRef::pruneCache(int lo, int hi) {
   }
 }
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

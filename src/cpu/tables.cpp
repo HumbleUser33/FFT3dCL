@@ -1,7 +1,7 @@
 #include "tables.h"
 #include <cmath>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 static const double pi = 3.14159265358979323846;
 
@@ -155,4 +155,4 @@ std::vector<float> buildSharpenLUT(int bw, int bh, float strength, float svr,
   return lut;
 }
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

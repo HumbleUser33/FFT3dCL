@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
-project(fft3dgpu_vs CXX)
+project(fft3dcl_vs CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_library(fft3dgpu SHARED
-  src/fft3dgpu.cpp
+add_library(fft3dcl SHARED
+  src/fft3dcl.cpp
   src/cpu/fft.cpp
   src/cpu/tables.cpp
   src/cpu/reference.cpp
@@ -13,14 +13,14 @@ add_library(fft3dgpu SHARED
   src/cl/gpu.cpp
 )
 
-target_include_directories(fft3dgpu PRIVATE src src/cl src/cpu third_party/vapoursynth)
+target_include_directories(fft3dcl PRIVATE src src/cl src/cpu third_party/vapoursynth)
 
 if (MSVC)
   # /fp:precise = IEEE-compliant, no fast-math reassociation (reproducibility).
-  target_compile_options(fft3dgpu PRIVATE /W4 /fp:precise /EHsc /utf-8)
-  target_compile_definitions(fft3dgpu PRIVATE _CRT_SECURE_NO_WARNINGS)
+  target_compile_options(fft3dcl PRIVATE /W4 /fp:precise /EHsc /utf-8)
+  target_compile_definitions(fft3dcl PRIVATE _CRT_SECURE_NO_WARNINGS)
   # Static CRT so the DLL can be dropped into StaxRip's plugin folder.
-  set_property(TARGET fft3dgpu PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  set_property(TARGET fft3dcl PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 # VapourSynth is not linked: the plugin receives the API through VapourSynthPluginInit2.

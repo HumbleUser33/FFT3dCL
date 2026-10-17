@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Example of FFT3DGPU usage in a VapourSynth script (StaxRip or vspipe).
+# Example of FFT3DCL usage in a VapourSynth script (StaxRip or vspipe).
 #
 # If the DLL is not in VapourSynth's plugins folder, uncomment the LoadPlugin
 # line below and adjust the path.
@@ -8,7 +8,7 @@ import vapoursynth as vs
 
 core = vs.core
 
-# core.std.LoadPlugin(r"C:\path\to\fft3dgpu.dll")
+# core.std.LoadPlugin(r"C:\path\to\fft3dcl.dll")
 
 # Source (BestSource example; in StaxRip the source is already defined).
 clip = core.bs.VideoSource(source=r"C:\path\to\Sample.mkv")
@@ -16,8 +16,8 @@ clip = core.bs.VideoSource(source=r"C:\path\to\Sample.mkv")
 # Optionally convert to 16-bit / an internal format if needed (not required:
 # the filter accepts 8-16 bit integer and 32-bit float directly).
 
-# FFT3DGPU denoising (settings identical to the original 0.8.6).
-clip = core.fft3dgpu.FFT3DGPU(
+# FFT3DCL denoising (settings identical to the original 0.8.6).
+clip = core.fft3dcl.FFT3DCL(
     clip,
     sigma=2.0,        # denoising strength
     bt=3,             # temporal window (-1..4, 0 = Kalman)

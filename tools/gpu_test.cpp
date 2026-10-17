@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-using namespace fft3dgpu;
+using namespace fft3dcl;
 
 #define CHECK(expr)                                                            \
   do {                                                                         \

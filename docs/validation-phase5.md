@@ -6,7 +6,7 @@ self-contained.
 
 ## 1. Self-contained DLL
 
-`dumpbin /DEPENDENTS fft3dgpu.dll` → a single dependency: `KERNEL32.dll`.
+`dumpbin /DEPENDENTS fft3dcl.dll` → a single dependency: `KERNEL32.dll`.
 - Visual C++ runtime linked statically (no `VCRUNTIME140.dll` / `MSVCP140.dll`).
 - `OpenCL.dll` loaded dynamically at run time (present with any GPU driver).
 - Size: ~258 KB.
@@ -19,7 +19,7 @@ Two methods tested, both valid:
 - **Auto-load**: copying the DLL into VapourSynth's `plugins` folder
   (`...\site-packages\vapoursynth\plugins`) → loaded with no environment
   variable set.
-- **`core.std.LoadPlugin(r"...fft3dgpu.dll")`**: works (exit 0).
+- **`core.std.LoadPlugin(r"...fft3dcl.dll")`**: works (exit 0).
 
 StaxRip: drop the DLL into its VapourSynth plugins folder, or add the
 `LoadPlugin` line at the top of the script.
@@ -52,14 +52,14 @@ plus bytes still allocated. Cause: frames obtained through `getFrameFilter`
 
 After the fix: the remaining counter is **bounded by the core's cache**
 (~20 frames, independent of the total frame count) → no growing leak.
-`fft3dgpuFree` is called. This warning is **common with third-party temporal
+`fft3dclFree` is called. This warning is **common with third-party temporal
 filters** (blur, DFTTest, FrameRateConverter): a benign teardown artefact with
 no effect on the output.
 
 ## 6. Package
 
-`release\fft3dgpu\`:
-- `fft3dgpu.dll` (identical to the current build — hash verified)
+`release\fft3dcl\`:
+- `fft3dcl.dll` (identical to the current build — hash verified)
 - `README.md` (StaxRip installation + usage + notes)
 - `sample.vpy` (example script)
 

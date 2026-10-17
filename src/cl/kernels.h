@@ -1,10 +1,10 @@
 #pragma once
-// OpenCL C 1.2 kernel sources for the FFT3DGPU port.
+// OpenCL C 1.2 kernel sources for the FFT3DCL port.
 // Embedded as a string: no .cl file deployment needed.
 // Portability rules: no fp64, no atomics, dynamic local memory,
 // barriers only, work-group <= 1024.
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 inline const char* kKernelSource() {
   return R"CL(
@@ -380,4 +380,4 @@ __kernel void synthesize(__global const float* restrict blocks,
 )CL";
 }
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

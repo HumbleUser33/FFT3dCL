@@ -8,7 +8,7 @@ The denoising method and **all 23 original parameters are preserved exactly**.
 Only `NVPerf` was dropped (it was Direct3D 9 specific).
 
 ```python
-clip = core.fft3dgpu.FFT3DGPU(clip, sigma=2.0, bt=3)
+clip = core.fft3dcl.FFT3DCL(clip, sigma=2.0, bt=3)
 ```
 
 ---
@@ -41,17 +41,17 @@ The DLL is **self-contained**: the Visual C++ runtime is linked statically and
 `OpenCL.dll` is loaded at run time by the graphics driver. Single dependency:
 `KERNEL32.dll`.
 
-Copy `release/fft3dgpu/fft3dgpu.dll` into the VapourSynth `plugins` folder, or
+Copy `release/fft3dcl/fft3dcl.dll` into the VapourSynth `plugins` folder, or
 load it explicitly:
 
 ```python
-core.std.LoadPlugin(r"C:\path\to\fft3dgpu.dll")
+core.std.LoadPlugin(r"C:\path\to\fft3dcl.dll")
 ```
 
 With **StaxRip**: drop the DLL into StaxRip's VapourSynth plugins folder
 (`Apps\Plugins\VapourSynth\`), then call the filter from the script.
-See [`release/fft3dgpu/README.md`](release/fft3dgpu/README.md) and
-[`release/fft3dgpu/sample.vpy`](release/fft3dgpu/sample.vpy).
+See [`release/fft3dcl/README.md`](release/fft3dcl/README.md) and
+[`release/fft3dcl/sample.vpy`](release/fft3dcl/sample.vpy).
 
 ---
 
@@ -94,7 +94,7 @@ cmake -S . -B build
 cmake --build build --config Release
 ```
 
-The resulting DLL is `build/Release/fft3dgpu.dll`.
+The resulting DLL is `build/Release/fft3dcl.dll`.
 
 ---
 

@@ -1,36 +1,36 @@
-# FFT3DGPU — VapourSynth port (OpenCL GPU)
+# FFT3DCL — VapourSynth port (OpenCL GPU)
 
 Modern port of the **FFT3dGPU v0.8.6** GPU denoiser (Avisynth+) to a **native
 VapourSynth (API 4) plugin**, running on **NVIDIA, AMD and Intel** graphics
 cards via OpenCL 1.2. The denoising method and all original parameters are
 preserved exactly.
 
-Namespace: `fft3dgpu` — function: `core.fft3dgpu.FFT3DGPU(clip, ...)`.
+Namespace: `fft3dcl` — function: `core.fft3dcl.FFT3DCL(clip, ...)`.
 
 ---
 
 ## 1. Installation
 
-Copy `fft3dgpu.dll` into the VapourSynth plugins folder. The DLL is
+Copy `fft3dcl.dll` into the VapourSynth plugins folder. The DLL is
 **self-contained** (static CRT, no Visual C++ DLL required; OpenCL is loaded at
 run time from the driver).
 
 ### With StaxRip
 StaxRip ships its own VapourSynth. Two options:
 
-- **Plugins folder** (recommended): drop `fft3dgpu.dll` into
+- **Plugins folder** (recommended): drop `fft3dcl.dll` into
   `<StaxRip folder>\Apps\Plugins\VapourSynth\` (or your VapourSynth `plugins`
   folder). It will be loaded automatically.
 - **Explicit load**: add at the top of the VapourSynth script (`*.vpy`):
   ```python
-  core.std.LoadPlugin(r"C:\path\to\fft3dgpu.dll")
+  core.std.LoadPlugin(r"C:\path\to\fft3dcl.dll")
   ```
 
 ### Quick check
 ```
 vspipe --info your_script.vpy
 ```
-must list the `FFT3DGPU` filter without errors.
+must list the `FFT3DCL` filter without errors.
 
 ---
 
@@ -42,14 +42,14 @@ Minimal example (luma denoising, default settings identical to the original):
 import vapoursynth as vs
 core = vs.core
 clip = core.std.AcquireSource(...)          # your source
-clip = core.fft3dgpu.FFT3DGPU(clip)
+clip = core.fft3dcl.FFT3DCL(clip)
 clip.set_output()
 ```
 
 Example with typical parameters:
 
 ```python
-clip = core.fft3dgpu.FFT3DGPU(
+clip = core.fft3dcl.FFT3DCL(
     clip,
     sigma=2.0,      # denoising strength
     bt=3,           # temporal window (-1..4; 0 = Kalman)

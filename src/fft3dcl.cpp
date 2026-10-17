@@ -1,5 +1,5 @@
-// FFT3DGPU VapourSynth plugin (API 4) — port of FFT3dGPU v0.8.6 for Avisynth+.
-// Namespace: fft3dgpu. Function: fft3dgpu.FFT3DGPU(clip, ...23 params...).
+// FFT3DCL VapourSynth plugin (API 4) — port of FFT3dGPU v0.8.6 for Avisynth+.
+// Namespace: fft3dcl. Function: fft3dcl.FFT3DCL(clip, ...23 params...).
 //
 // Phase 2: CPU reference backend (fp32). OpenCL backend arrives in phase 3.
 // Intentional differences from the original are listed in docs/porting-map.md.
@@ -16,7 +16,7 @@
 #include <mutex>
 #include <vector>
 
-using namespace fft3dgpu;
+using namespace fft3dcl;
 
 namespace {
 
@@ -47,34 +47,34 @@ struct FilterInstance {
   std::mutex mtx; // guards cache, refs scratch, degrid init
 };
 
-const VSFrame* VS_CC fft3dgpuGetFrame(int n, int activationReason, void* instanceData,
+const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instanceData,
                                       void** frameData, VSFrameContext* frameCtx, VSCore* core,
                                       const VSAPI* vsapi);
-void VS_CC fft3dgpuFree(void* instanceData, VSCore* core, const VSAPI* vsapi);
+void VS_CC fft3dclFree(void* instanceData, VSCore* core, const VSAPI* vsapi);
 
 // ---- create ---------------------------------------------------------------
 
-void VS_CC fft3dgpuCreate(const VSMap* in, VSMap* out, void* userData, VSCore* core,
+void VS_CC fft3dclCreate(const VSMap* in, VSMap* out, void* userData, VSCore* core,
                           const VSAPI* vsapi) {
   int err = 0;
   VSNode* clip = vsapi->mapGetNode(in, "clip", 0, &err);
   if (err || !clip) {
-    vsapi->mapSetError(out, "FFT3DGPU: a video clip must be specified as the 'clip' argument");
+    vsapi->mapSetError(out, "FFT3DCL: a video clip must be specified as the 'clip' argument");
     return;
   }
   const VSVideoInfo* srcvi = vsapi->getVideoInfo(clip);
   if (!vsh::isConstantVideoFormat(srcvi) ||
       (srcvi->format.numPlanes != 1 && srcvi->format.numPlanes != 3)) {
-    vsapi->mapSetError(out, "FFT3DGPU: only constant-format gray, YUV and planar RGB clips are supported");
+    vsapi->mapSetError(out, "FFT3DCL: only constant-format gray, YUV and planar RGB clips are supported");
     return;
   }
   const VSVideoFormat& f = srcvi->format;
   if (f.sampleType == stFloat && f.bitsPerSample != 32) {
-    vsapi->mapSetError(out, "FFT3DGPU: only 32-bit float clips supported (16-bit float not ported yet)");
+    vsapi->mapSetError(out, "FFT3DCL: only 32-bit float clips supported (16-bit float not ported yet)");
     return;
   }
   if (f.sampleType == stInteger && (f.bitsPerSample < 8 || f.bitsPerSample > 16)) {
-    vsapi->mapSetError(out, "FFT3DGPU: integer bit depths 8-16 only");
+    vsapi->mapSetError(out, "FFT3DCL: integer bit depths 8-16 only");
     return;
   }
 
@@ -125,7 +125,7 @@ void VS_CC fft3dgpuCreate(const VSMap* in, VSMap* out, void* userData, VSCore* c
     plane = 4;
   if (f.colorFamily == cfGray) {
     if (plane == 1) {
-      vsapi->mapSetError(out, "FFT3DGPU: cannot set chroma processing for a greyscale clip");
+      vsapi->mapSetError(out, "FFT3DCL: cannot set chroma processing for a greyscale clip");
       return;
     }
     if (plane == 4)
@@ -134,7 +134,7 @@ void VS_CC fft3dgpuCreate(const VSMap* in, VSMap* out, void* userData, VSCore* c
   if (plane == 2 || plane == 3)
     plane = 1;
   if (plane != 0 && plane != 1 && plane != 4) {
-    vsapi->mapSetError(out, "FFT3DGPU: plane must be 0 (luma), 1 (chroma) or 4 (all)");
+    vsapi->mapSetError(out, "FFT3DCL: plane must be 0 (luma), 1 (chroma) or 4 (all)");
     return;
   }
 
@@ -154,7 +154,7 @@ void VS_CC fft3dgpuCreate(const VSMap* in, VSMap* out, void* userData, VSCore* c
   if (device != 0) {
     std::call_once(g_gpuOnce, initGpuOnce);
     if (!g_gpuOk && device == 1) {
-      vsapi->mapSetError(out, "FFT3DGPU: no OpenCL GPU device available (device=1)");
+      vsapi->mapSetError(out, "FFT3DCL: no OpenCL GPU device available (device=1)");
       return;
     }
     inst->useGpu = g_gpuOk;
@@ -195,7 +195,7 @@ void VS_CC fft3dgpuCreate(const VSMap* in, VSMap* out, void* userData, VSCore* c
   // Kalman (bt=0) is stateful: fmFrameState delivers frames in order, one at a
   // time — same sequential semantics as the original MT_SERIALIZED filter.
   int fm = (sp.bt == 0) ? fmFrameState : fmParallelRequests;
-  vsapi->createVideoFilter(out, "FFT3DGPU", srcvi, fft3dgpuGetFrame, fft3dgpuFree, fm,
+  vsapi->createVideoFilter(out, "FFT3DCL", srcvi, fft3dclGetFrame, fft3dclFree, fm,
                            deps, 1, inst.release(), core);
 }
 
@@ -213,7 +213,7 @@ inline int clampFrame(int n, int numFrames) {
   return n;
 }
 
-const VSFrame* VS_CC fft3dgpuGetFrame(int n, int activationReason, void* instanceData,
+const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instanceData,
                                       void** frameData, VSFrameContext* frameCtx, VSCore* core,
                                       const VSAPI* vsapi) {
   FilterInstance* inst = static_cast<FilterInstance*>(instanceData);
@@ -348,7 +348,7 @@ const VSFrame* VS_CC fft3dgpuGetFrame(int n, int activationReason, void* instanc
   return dst;
 }
 
-void VS_CC fft3dgpuFree(void* instanceData, VSCore* core, const VSAPI* vsapi) {
+void VS_CC fft3dclFree(void* instanceData, VSCore* core, const VSAPI* vsapi) {
   delete static_cast<FilterInstance*>(instanceData);
 }
 
@@ -356,7 +356,7 @@ void VS_CC fft3dgpuFree(void* instanceData, VSCore* core, const VSAPI* vsapi) {
 
 // ---- plugin entry ----------------------------------------------------------
 
-static const char* const fft3dgpuArgs =
+static const char* const fft3dclArgs =
     "clip:vnode;"
     "sigma:float:opt;beta:float:opt;bw:int:opt;bh:int:opt;bt:int:opt;sharpen:float:opt;"
     "plane:int:opt;mode:int:opt;bordersize:int:opt;precision:int:opt;degrid:float:opt;"
@@ -365,7 +365,7 @@ static const char* const fft3dgpuArgs =
     "sigma3:float:opt;sigma4:float:opt;oldfft:int:opt;device:int:opt";
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
-  vspapi->configPlugin("com.github.pinterf.fft3dgpu", "fft3dgpu", "FFT3DGPU denoiser (VS port)",
+  vspapi->configPlugin("com.github.humbleuser33.fft3dcl", "fft3dcl", "FFT3DCL denoiser (VS port)",
                        VS_MAKE_VERSION(0, 8), VAPOURSYNTH_API_VERSION, 0, plugin);
-  vspapi->registerFunction("FFT3DGPU", fft3dgpuArgs, "clip:vnode;", fft3dgpuCreate, nullptr, plugin);
+  vspapi->registerFunction("FFT3DCL", fft3dclArgs, "clip:vnode;", fft3dclCreate, nullptr, plugin);
 }

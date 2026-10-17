@@ -16,16 +16,16 @@ is validated two ways:
 |---|---|---|
 | default (mode 1, bt=3, degrid=1) | 97.1% | 1 |
 | bt=1 | 97.1% | 1 |
-| bt=2 | 96.0% | 1 |
+| bt=2 | 96.0% | 2 |
 | bt=4 | 84.7% | 2 |
-| bt=0 (Kalman) | 94.0% | 1 |
+| bt=0 (Kalman) | 94.0% | 2 |
 | sharpen=1 | 90.8% | 1 |
 | wintype=1 | 97.0% | 1 |
-| wintype=2 | 96.8% | 1 |
+| wintype=2 | 96.8% | 2 |
 | sigma2/3/4 pattern | 97.6% | 1 |
 | beta=2 | 97.4% | 1 |
-| plane=4 (luma+chroma) | 96.3% | 1 |
-| bw=64,bh=64 | 93.5% | 1 |
+| plane=4 (luma+chroma) | 96.3% | 2 |
+| bw=64,bh=64 | 93.5% | 2 |
 | 10-bit default (yuv420p10le) | 94.8% | 4 |
 
 These match the CPU reference's numbers (docs/validation-phase2.md) within a
@@ -65,3 +65,17 @@ validated oracle.
 General-o mode 1 (`ow*2 != bw` or `oh*2 != bh`) uses the same uniform block
 grid as the CPU reference and is approximate (see validation-phase2.md). The
 half-overlap default is exact.
+
+## Re-validation after the `fft3dcl` rename (2026-10-18)
+
+The filter was renamed `fft3dgpu`/`FFT3DGPU` → `fft3dcl`/`FFT3DCL` (namespace,
+function name, plugin identifier, source file and DLL names). Two checks:
+
+1. **Previous build vs renamed build** (`tools/ab_test.ps1`: both DLLs loaded
+   side by side, same clip, same parameters): **100 % identical samples,
+   max diff 0** for default, `bt=4`, `bt=0`, `plane=4`, `sharpen=1`,
+   `bw=64,bh=64` and the 10-bit clip. The rename changes no pixel.
+2. **Matrix re-run against the original 0.8.6** (`tools/run_test.ps1 -PortParams
+   "device=1"`): the percentages in the table above reproduce to ±0.05 %, and the
+   max-diff column has been corrected to the measured values — they now match the
+   CPU oracle table in `docs/validation-phase2.md`.

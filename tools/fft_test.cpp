@@ -5,7 +5,7 @@
 #include <random>
 #include <vector>
 
-using namespace fft3dgpu;
+using namespace fft3dcl;
 
 int main() {
   const int bw = 32, bh = 32, fbw = bw / 2 + 1;

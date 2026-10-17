@@ -3,7 +3,7 @@
 #include <cmath>
 #include <vector>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 FftPlan::FftPlan(int n) : n_(n) {
   tw_.resize(n / 2);
@@ -118,4 +118,4 @@ void fft2dRealInverseHalf(const std::complex<float>* half, int bw, int bh, int f
   }
 }
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

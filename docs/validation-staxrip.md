@@ -2,7 +2,7 @@
 
 ## Report
 
-Installing `fft3dgpu.dll` as a StaxRip plugin and starting the preview on
+Installing `fft3dcl.dll` as a StaxRip plugin and starting the preview on
 `Sample.mkv` closed StaxRip immediately, with no error message. Reproduced on
 two machines (RTX 3050 and RTX 4080), so it was not GPU-related.
 
@@ -35,7 +35,7 @@ message.
 
 ## Fix
 
-`src/fft3dgpu.cpp`: added `clampFrame()`, and the frame requests in the
+`src/fft3dcl.cpp`: added `clampFrame()`, and the frame requests in the
 `arInitial` branch of `getFrame` now clamp to `[0, numFrames-1]` before calling
 `requestFrameFilter`. The window is requested as one contiguous clamped range,
 which is the same set of frames as clamping each index individually but without
@@ -86,7 +86,7 @@ figures):
   `Apps\Plugins\VS\...` and `Settings\Plugins\VapourSynth\`) make VapourSynth
   fail with `Plugin ... already loaded (com.github.pinterf.fft3dgpu)`.
 - StaxRip loads its plugins with explicit `core.std.LoadPlugin(...)` lines, so
-  the plugin namespace is `fft3dgpu` and the call is
-  `core.fft3dgpu.FFT3DGPU(clip, ...)`.
+  the plugin namespace is `fft3dcl` and the call is
+  `core.fft3dcl.FFT3DCL(clip, ...)`.
 - The plugin registers itself as API R4.3 and loads correctly on an R4.2 core;
   it only calls functions that exist since API 4.0.

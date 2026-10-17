@@ -12,7 +12,7 @@
 #define CL_API_CALL __stdcall
 #endif
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 // --- minimal OpenCL types/constants (values fixed by the spec) ---
 typedef int cl_int;
@@ -123,4 +123,4 @@ struct GpuContext {
   void shutdown();
 };
 
-} // namespace fft3dgpu
+} // namespace fft3dcl

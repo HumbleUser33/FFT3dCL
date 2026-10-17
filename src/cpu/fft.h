@@ -2,7 +2,7 @@
 #include <complex>
 #include <vector>
 
-namespace fft3dgpu {
+namespace fft3dcl {
 
 // 1D complex FFT, length = power of two. Stockham autosort radix-2.
 // Twiddle factors are computed once in double and stored as float, matching
@@ -38,4 +38,4 @@ void fft2dRealInverseHalf(const std::complex<float>* half, int bw, int bh, int f
                           const FftPlan& rowPlan, const FftPlan& colPlan,
                           float* block);
 
-} // namespace fft3dgpu
+} // namespace fft3dcl
