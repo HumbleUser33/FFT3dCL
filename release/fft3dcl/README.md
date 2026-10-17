@@ -1,4 +1,4 @@
-# FFT3DCL — VapourSynth port (OpenCL GPU)
+# FFT3dCL — VapourSynth port (OpenCL GPU)
 
 Modern port of the **FFT3dGPU v0.8.6** GPU denoiser (Avisynth+) to a **native
 VapourSynth (API 4) plugin**, running on **NVIDIA, AMD and Intel** graphics

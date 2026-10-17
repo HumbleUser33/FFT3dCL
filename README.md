@@ -1,4 +1,4 @@
-# FFT3DCL
+# FFT3dCL
 
 Modern port of **FFT3dGPU v0.8.6** (an Avisynth+-only, Direct3D 9 filter) to a
 **native VapourSynth (API 4) plugin**, with an **OpenCL 1.2** backend that runs
