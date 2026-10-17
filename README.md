@@ -23,13 +23,15 @@ clip = core.fft3dgpu.FFT3DGPU(clip, sigma=2.0, bt=3)
 | Conformité vs original 0.8.6 | ✅ écart ±1–2 LSB (8 bits), ±4 (10 bits) |
 | Déterminisme (threads, relances) | ✅ 100 % identique |
 | Rendus réels 4K HDR10 | ✅ |
+| Intégration StaxRip (VapourSynth R79) | ✅ testé — voir [`docs/validation-staxrip.md`](docs/validation-staxrip.md) |
 | AMD / Intel | ⚠️ non testés (portabilité garantie par les règles OpenCL 1.2 strictes) |
 
 Les écarts avec l'original viennent de deux implémentations FFT indépendantes
 (bruit d'arrondi), pas d'un changement d'algorithme. Détail complet dans
 [`docs/validation-phase2.md`](docs/validation-phase2.md),
-[`docs/validation-phase3.md`](docs/validation-phase3.md) et
-[`docs/validation-phase5.md`](docs/validation-phase5.md).
+[`docs/validation-phase3.md`](docs/validation-phase3.md),
+[`docs/validation-phase5.md`](docs/validation-phase5.md) et
+[`docs/validation-staxrip.md`](docs/validation-staxrip.md).
 
 ---
 

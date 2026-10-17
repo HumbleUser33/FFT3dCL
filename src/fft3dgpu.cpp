@@ -201,6 +201,18 @@ void VS_CC fft3dgpuCreate(const VSMap* in, VSMap* out, void* userData, VSCore* c
 
 // ---- getframe -------------------------------------------------------------
 
+// VapourSynth differs on out-of-range frame requests: newer cores clamp them,
+// older ones (R79, shipped by StaxRip) abort the whole process with
+// "Negative frame request by: <filter>". Clamp on our side so behaviour is
+// identical on every core version.
+inline int clampFrame(int n, int numFrames) {
+  if (n < 0)
+    return 0;
+  if (n > numFrames - 1)
+    return numFrames - 1;
+  return n;
+}
+
 const VSFrame* VS_CC fft3dgpuGetFrame(int n, int activationReason, void* instanceData,
                                       void** frameData, VSFrameContext* frameCtx, VSCore* core,
                                       const VSAPI* vsapi) {
@@ -211,10 +223,14 @@ const VSFrame* VS_CC fft3dgpuGetFrame(int n, int activationReason, void* instanc
 
   if (activationReason == arInitial) {
     if (ip.bm >= 2) {
-      for (int i = 0; i < ip.bt; i++)
-        vsapi->requestFrameFilter(n - ip.current + i, clip, frameCtx);
+      // Request the clamped window as one contiguous range: same set of frames
+      // as clamping each index individually, but without duplicate requests.
+      const int lo = clampFrame(n - ip.current, vi.numFrames);
+      const int hi = clampFrame(n - ip.current + ip.bt - 1, vi.numFrames);
+      for (int f = lo; f <= hi; f++)
+        vsapi->requestFrameFilter(f, clip, frameCtx);
     } else {
-      vsapi->requestFrameFilter(n, clip, frameCtx);
+      vsapi->requestFrameFilter(clampFrame(n, vi.numFrames), clip, frameCtx);
     }
     return nullptr;
   }
@@ -257,8 +273,7 @@ const VSFrame* VS_CC fft3dgpuGetFrame(int n, int activationReason, void* instanc
     if (inst->useGpu) {
       GpuRef& gpu = *inst->gpus[k];
       auto ensure = [&](int fn) {
-        if (fn < 0) fn = 0;
-        if (fn > vi.numFrames - 1) fn = vi.numFrames - 1;
+        fn = clampFrame(fn, vi.numFrames);
         if (gpu.has(fn))
           return fn;
         const VSFrame* fr = vsapi->getFrameFilter(fn, clip, frameCtx);
@@ -294,8 +309,7 @@ const VSFrame* VS_CC fft3dgpuGetFrame(int n, int activationReason, void* instanc
 
     auto& cache = inst->cache[k];
     auto getSpectra = [&](int fn) -> std::shared_ptr<PlaneRef::Spectra> {
-      if (fn < 0) fn = 0;
-      if (fn > vi.numFrames - 1) fn = vi.numFrames - 1;
+      fn = clampFrame(fn, vi.numFrames);
       auto it = cache.find(fn);
       if (it != cache.end())
         return it->second;
