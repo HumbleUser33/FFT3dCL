@@ -1,11 +1,11 @@
 # FFT3dOpenCL
 
-Port moderne de **FFT3dGPU v0.8.6** (filtre Avisynth+ uniquement, DirectX 9) en
-plugin **VapourSynth natif (API 4)**, avec un backend **OpenCL 1.2** qui tourne
-sur carte graphique **NVIDIA, AMD et Intel**.
+Modern port of **FFT3dGPU v0.8.6** (an Avisynth+-only, Direct3D 9 filter) to a
+**native VapourSynth (API 4) plugin**, with an **OpenCL 1.2** backend that runs
+on **NVIDIA, AMD and Intel** graphics cards.
 
-La méthode de débruitage et **les 23 paramètres d'origine sont conservés à
-l'identique**. Seul `NVPerf` a été supprimé (il ne concernait que DirectX 9).
+The denoising method and **all 23 original parameters are preserved exactly**.
+Only `NVPerf` was dropped (it was Direct3D 9 specific).
 
 ```python
 clip = core.fft3dgpu.FFT3DGPU(clip, sigma=2.0, bt=3)
@@ -13,104 +13,106 @@ clip = core.fft3dgpu.FFT3DGPU(clip, sigma=2.0, bt=3)
 
 ---
 
-## État du projet
+## Project status
 
-| Élément | État |
+| Item | Status |
 |---|---|
-| Backend CPU de référence | ✅ complet et validé |
-| Backend GPU OpenCL | ✅ complet et validé |
-| Plugin VapourSynth API 4 | ✅ |
-| Conformité vs original 0.8.6 | ✅ écart ±1–2 LSB (8 bits), ±4 (10 bits) |
-| Déterminisme (threads, relances) | ✅ 100 % identique |
-| Rendus réels 4K HDR10 | ✅ |
-| Intégration StaxRip (VapourSynth R79) | ✅ testé — voir [`docs/validation-staxrip.md`](docs/validation-staxrip.md) |
-| AMD / Intel | ⚠️ non testés (portabilité garantie par les règles OpenCL 1.2 strictes) |
+| CPU reference backend | ✅ complete and validated |
+| OpenCL GPU backend | ✅ complete and validated |
+| VapourSynth API 4 plugin | ✅ |
+| Match against original 0.8.6 | ✅ ±1–2 LSB (8-bit), ±4 (10-bit) |
+| Determinism (threads, repeated runs) | ✅ 100 % identical |
+| Real 4K HDR10 renders | ✅ |
+| StaxRip integration (VapourSynth R79) | ✅ tested — see [`docs/validation-staxrip.md`](docs/validation-staxrip.md) |
+| AMD / Intel | ⚠️ not tested (portability guaranteed by strict OpenCL 1.2 rules) |
 
-Les écarts avec l'original viennent de deux implémentations FFT indépendantes
-(bruit d'arrondi), pas d'un changement d'algorithme. Détail complet dans
+The differences from the original come from two independent FFT implementations
+(rounding noise), not from a change of algorithm. Full details in
 [`docs/validation-phase2.md`](docs/validation-phase2.md),
 [`docs/validation-phase3.md`](docs/validation-phase3.md),
-[`docs/validation-phase5.md`](docs/validation-phase5.md) et
+[`docs/validation-phase5.md`](docs/validation-phase5.md) and
 [`docs/validation-staxrip.md`](docs/validation-staxrip.md).
 
 ---
 
 ## Installation
 
-Le DLL est **autonome** : CRT Visual C++ lié en statique, `OpenCL.dll` chargé à
-l'exécution par le pilote graphique. Une seule dépendance : `KERNEL32.dll`.
+The DLL is **self-contained**: the Visual C++ runtime is linked statically and
+`OpenCL.dll` is loaded at run time by the graphics driver. Single dependency:
+`KERNEL32.dll`.
 
-Copier `release/fft3dgpu/fft3dgpu.dll` dans le dossier `plugins` de VapourSynth,
-ou charger explicitement :
+Copy `release/fft3dgpu/fft3dgpu.dll` into the VapourSynth `plugins` folder, or
+load it explicitly:
 
 ```python
-core.std.LoadPlugin(r"C:\chemin\vers\fft3dgpu.dll")
+core.std.LoadPlugin(r"C:\path\to\fft3dgpu.dll")
 ```
 
-Avec **StaxRip** : déposer le DLL dans le dossier plugins VapourSynth de StaxRip
-(`Apps\Plugins\VapourSynth\`), puis appeler le filtre dans le script.
-Voir [`release/fft3dgpu/README.md`](release/fft3dgpu/README.md) et
+With **StaxRip**: drop the DLL into StaxRip's VapourSynth plugins folder
+(`Apps\Plugins\VapourSynth\`), then call the filter from the script.
+See [`release/fft3dgpu/README.md`](release/fft3dgpu/README.md) and
 [`release/fft3dgpu/sample.vpy`](release/fft3dgpu/sample.vpy).
 
 ---
 
-## Paramètres
+## Parameters
 
-Tous les paramètres d'origine sont acceptés :
+All original parameters are accepted:
 
 `sigma`, `beta`, `bw`, `bh`, `bt`, `sharpen`, `plane`, `mode`, `bordersize`,
 `precision`, `degrid`, `scutoff`, `svr`, `smin`, `smax`, `kratio`, `ow`, `oh`,
 `wintype`, `interlaced`, `sigma2`, `sigma3`, `sigma4`, `oldfft`.
 
-Un paramètre propre au port, **sans effet sur le débruitage** :
+One parameter specific to this port, **with no effect on the denoising**:
 
-| `device` | Comportement |
+| `device` | Behaviour |
 |---|---|
-| `2` (défaut) | GPU OpenCL, repli automatique sur le CPU si le GPU échoue |
-| `1` | GPU obligatoire (erreur si indisponible) |
-| `0` | CPU de référence |
+| `2` (default) | OpenCL GPU, automatic fallback to the CPU if the GPU fails |
+| `1` | GPU required (error if unavailable) |
+| `0` | CPU reference |
 
-Formats acceptés : 8 à 16 bits entiers et float 32 bits, gris ou YUV planaire
-(le HDR10 10 bits fonctionne).
+Accepted formats: 8 to 16-bit integer and 32-bit float, greyscale or planar YUV
+(10-bit HDR10 works).
 
 ---
 
 ## Performance
 
-Mesuré sur RTX 3050 : le chemin GPU est environ **5× plus rapide** que le chemin
-CPU (1280×720 float : 1,02 s en GPU contre 5,49 s en CPU). Le 4K plein cadre
-tient dans 8 Go de mémoire vidéo.
+Measured on an RTX 3050: the GPU path is about **5× faster** than the CPU path
+(1280×720 float: 1.02 s on GPU vs 5.49 s on CPU). Full-frame 4K fits in 8 GB of
+video memory.
 
 ---
 
-## Compilation
+## Building
 
-Windows, Visual Studio 2022 (MSVC), CMake. Les en-têtes VapourSynth sont
-fournis dans `third_party/`.
+Windows, Visual Studio 2022 (MSVC), CMake. The VapourSynth headers are provided
+in `third_party/`.
 
 ```
 cmake -S . -B build
 cmake --build build --config Release
 ```
 
-Le DLL result est `build/Release/fft3dgpu.dll`.
+The resulting DLL is `build/Release/fft3dgpu.dll`.
 
 ---
 
-## Différences volontaires avec l'original
+## Intentional differences from the original
 
-Liste complète dans [`docs/porting-map.md`](docs/porting-map.md). Les principales :
+Full list in [`docs/porting-map.md`](docs/porting-map.md). The main ones:
 
-1. `bt=-1` fait le vrai aller-retour FFT (l'original sortait du noir sur la luminance).
-2. Mode 0 déterministe (l'original sortait parfois des images noires).
-3. Paramètre `device` ajouté (choix du moteur uniquement).
-4. `NVPerf` supprimé ; `oldfft` conservé mais ignoré.
-5. Recouvrement non standard (`ow*2 != bw` ou `oh*2 != bh`) approximatif :
-   le recouvrement demi-bloc, qui est le réglage par défaut, est exact.
+1. `bt=-1` performs the real FFT round-trip (the original output black luma).
+2. Mode 0 is deterministic (the original sometimes output black frames).
+3. A `device` parameter was added (engine selection only).
+4. `NVPerf` removed; `oldfft` kept but ignored.
+5. Non-standard overlap (`ow*2 != bw` or `oh*2 != bh`) is approximate:
+   half-block overlap, which is the default, is exact.
 
 ---
 
 ## Licence
 
-GNU GPL v2, comme le projet d'origine
-[pinterf/FFT3dGPU](https://github.com/pinterf/FFT3dGPU), dont ce port est dérivé.
+GNU GPL v2, like the original project
+[pinterf/FFT3dGPU](https://github.com/pinterf/FFT3dGPU), from which this port is
+derived.

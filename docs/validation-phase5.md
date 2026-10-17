@@ -1,69 +1,70 @@
-# Validation — Phase 5 (emballage StaxRip)
+# Validation — Phase 5 (StaxRip packaging)
 
-Objectif : vérifier que le plugin se charge et rend correctement dans un
-contexte réel (StaxRip / vspipe), sur les vrais clips 4K HDR, et que le DLL
-est autonome.
+Goal: check that the plugin loads and renders correctly in a real context
+(StaxRip / vspipe), on the real 4K HDR clips, and that the DLL is
+self-contained.
 
-## 1. DLL autonome
+## 1. Self-contained DLL
 
-`dumpbin /DEPENDENTS fft3dgpu.dll` → une seule dépendance : `KERNEL32.dll`.
-- CRT Visual C++ lié en statique (pas de `VCRUNTIME140.dll` / `MSVCP140.dll`).
-- `OpenCL.dll` chargé dynamiquement à l'exécution (présent avec tout pilote GPU).
-- Taille : ~258 Ko.
+`dumpbin /DEPENDENTS fft3dgpu.dll` → a single dependency: `KERNEL32.dll`.
+- Visual C++ runtime linked statically (no `VCRUNTIME140.dll` / `MSVCP140.dll`).
+- `OpenCL.dll` loaded dynamically at run time (present with any GPU driver).
+- Size: ~258 KB.
 
-Conclusion : le DLL se dépose tel quel, rien d'autre à installer.
+Conclusion: the DLL is dropped in as-is, nothing else to install.
 
-## 2. Chargement
+## 2. Loading
 
-Deux méthodes testées, toutes deux valides :
-- **Auto-load** : copie du DLL dans le dossier `plugins` de VapourSynth
-  (`...\site-packages\vapoursynth\plugins`) → chargé sans variable d'environnement.
-- **`core.std.LoadPlugin(r"...fft3dgpu.dll")`** : fonctionne (exit 0).
+Two methods tested, both valid:
+- **Auto-load**: copying the DLL into VapourSynth's `plugins` folder
+  (`...\site-packages\vapoursynth\plugins`) → loaded with no environment
+  variable set.
+- **`core.std.LoadPlugin(r"...fft3dgpu.dll")`**: works (exit 0).
 
-StaxRip : déposer le DLL dans son dossier plugins VapourSynth, ou ajouter la
-ligne `LoadPlugin` en tête du script.
+StaxRip: drop the DLL into its VapourSynth plugins folder, or add the
+`LoadPlugin` line at the top of the script.
 
-## 3. Rendus réels (GPU, device=1)
+## 3. Real renders (GPU, device=1)
 
-| Clip | Résolution / format | Frames | Temps filtre | Résultat |
-|------|--------------------|--------|--------------|----------|
-| Sample.mkv | 3840x2160 HEVC Main10 HDR10 | 8 | 2,13 s total | OK, sans erreur |
-| The Gorge 2025 | 1920x1038 AV1 10-bit HDR10 | 8 | 0,71 s (11,33 fps) | OK, sans erreur |
+| Clip | Resolution / format | Frames | Filter time | Result |
+|------|--------------------|--------|-------------|--------|
+| Sample.mkv | 3840x2160 HEVC Main10 HDR10 | 8 | 2.13 s total | OK, no error |
+| The Gorge 2025 | 1920x1038 AV1 10-bit HDR10 | 8 | 0.71 s (11.33 fps) | OK, no error |
 
-Le temps total de The Gorge (≈288 s) est dominé par le **décodage AV1 10-bit**
-du fichier lossless de 6 Go (L-SMASH), pas par le filtre. La mémoire GPU
-(RTX 3050, 8 Go) tient le 4K plein cadre sans problème.
+The total time for The Gorge (≈288 s) is dominated by the **10-bit AV1 decode**
+of the 6 GB lossless file (L-SMASH), not by the filter. GPU memory (RTX 3050,
+8 GB) handles full-frame 4K without problem.
 
-## 4. Comparaison 1080p 10-bit vs original (GPU)
+## 4. 1080p 10-bit comparison vs the original (GPU)
 
 Crop 1920x1080, 8 frames, `yuv420p10le`, GPU vs original Avisynth+ 0.8.6
-(`precision=2`) :
-- échantillons identiques : **96,64 %**
-- max écart : **4** (LSB 10-bit) — cohérent avec le petit clip 10-bit.
+(`precision=2`):
+- identical samples: **96.64 %**
+- maximum difference: **4** (10-bit LSB) — consistent with the small 10-bit
+  clip.
 
-## 5. Fuite de frames (corrigée)
+## 5. Frame leak (fixed)
 
-Symptôme initial : `Warning: Core freed but N filter instance(s) still exist`
-+ octets encore alloués. Cause : les frames obtenues par `getFrameFilter`
-(`src` + frames de la fenêtre temporelle) n'étaient jamais libérées.
-Correctif : `vsapi->freeFrame()` ajouté sur `src` et sur chaque frame de
-fenêtre (chemins CPU et GPU).
+Initial symptom: `Warning: Core freed but N filter instance(s) still exist`
+plus bytes still allocated. Cause: frames obtained through `getFrameFilter`
+(`src` + the temporal-window frames) were never released. Fix: added
+`vsapi->freeFrame()` on `src` and on each window frame (CPU and GPU paths).
 
-Après correctif : le compteur restant est **borné par le cache du core**
-(~20 frames, indépendant du nombre total de frames) → pas de fuite qui croît.
-`fft3dgpuFree` est bien appelé. Ce warning est **courant chez les filtres
-temporels tiers** (blur, DFTTest, FrameRateConverter) : artefact bénin de fin
-de vie, sans effet sur la sortie.
+After the fix: the remaining counter is **bounded by the core's cache**
+(~20 frames, independent of the total frame count) → no growing leak.
+`fft3dgpuFree` is called. This warning is **common with third-party temporal
+filters** (blur, DFTTest, FrameRateConverter): a benign teardown artefact with
+no effect on the output.
 
-## 6. Paquet
+## 6. Package
 
-`release\fft3dgpu\` :
-- `fft3dgpu.dll` (identique au build courant — hash vérifié)
-- `README.md` (installation StaxRip + usage + notes)
-- `sample.vpy` (exemple de script)
+`release\fft3dgpu\`:
+- `fft3dgpu.dll` (identical to the current build — hash verified)
+- `README.md` (StaxRip installation + usage + notes)
+- `sample.vpy` (example script)
 
 ## Verdict
 
-Phase 5 validée : DLL autonome, chargement auto + LoadPlugin OK, rendus 4K
-HDR réels OK, 1080p 10-bit conforme à l'original, fuite corrigée. Le plugin
-est prêt pour StaxRip.
+Phase 5 validated: self-contained DLL, auto-load + LoadPlugin OK, real 4K HDR
+renders OK, 1080p 10-bit matching the original, leak fixed. The plugin is ready
+for StaxRip.
