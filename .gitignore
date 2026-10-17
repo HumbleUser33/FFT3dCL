@@ -1,0 +1,39 @@
+# --- Build outputs ---
+build/
+out/
+*.obj
+*.pdb
+*.exp
+*.log
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# --- Local toolchain (Avisynth+, ffmpeg, L-SMASH: third-party binaries) ---
+env/
+
+# --- Upstream reference clone (pinterf/FFT3dGPU, kept locally for comparison) ---
+# Anchored at the repo root: an unanchored pattern also matches release/fft3dgpu/
+# because gitignore is case-insensitive on Windows.
+/FFT3dGPU/
+
+# --- Editor / agent state ---
+.vs/
+.agents/
+.idea/
+
+# --- Media and test clips (large, never versioned) ---
+*.mkv
+*.y4m
+*.avi
+*.lwi
+*.pyo
+__pycache__/
+
+# --- Scratch files produced while testing (leading underscore) ---
+tools/_*
+*.yuv
+
+# --- Stray timecode files created by test scripts ---
+/1
+/8

@@ -1,0 +1,18 @@
+# Normalize line endings so the repo is consistent regardless of the
+# contributor's git settings (sources were edited on Windows).
+* text=auto
+
+*.cpp text
+*.h text
+*.ps1 text
+*.py text
+*.vpy text
+*.avs text
+*.md text
+*.txt text
+CMakeLists.txt text
+
+*.dll binary
+*.yuv binary
+*.mkv binary
+*.y4m binary
