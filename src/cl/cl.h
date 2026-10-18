@@ -11,6 +11,9 @@
 #ifndef CL_API_CALL
 #define CL_API_CALL __stdcall
 #endif
+#ifndef CL_CALLBACK
+#define CL_CALLBACK __stdcall
+#endif
 
 namespace fft3dcl {
 
@@ -46,8 +49,10 @@ typedef struct _cl_event* cl_event;
 #define CL_MEM_COPY_HOST_PTR (1 << 5)
 #define CL_MEM_ALLOC_HOST_PTR (1 << 4)
 #define CL_TRUE 1
+#define CL_FALSE 0
 #define CL_MAP_READ (1 << 0)
 #define CL_MAP_WRITE (1 << 1)
+#define CL_COMPLETE 0x0
 
 class ClApi {
 public:
@@ -70,12 +75,17 @@ public:
   cl_int enqueueNDRange(cl_command_queue q, cl_kernel k, cl_uint dim, const size_t* goff, const size_t* gsize, const size_t* lsize, cl_uint nw, const cl_event* we, cl_event* ev) const;
   cl_int enqueueReadBuffer(cl_command_queue q, cl_mem buf, cl_bool block, size_t off, size_t sz, void* dst, cl_uint nw, const cl_event* we, cl_event* ev) const;
   cl_int enqueueWriteBuffer(cl_command_queue q, cl_mem buf, cl_bool block, size_t off, size_t sz, const void* src, cl_uint nw, const cl_event* we, cl_event* ev) const;
-  cl_int enqueueMapBuffer(cl_command_queue q, cl_mem buf, cl_bool block, cl_uint map, size_t off, size_t sz, cl_uint nw, const cl_event* we, cl_event* ev) const;
+  void* enqueueMapBuffer(cl_command_queue q, cl_mem buf, cl_bool block, cl_uint map, size_t off, size_t sz, cl_uint nw, const cl_event* we, cl_event* ev, cl_int* err) const;
   cl_int enqueueUnmapMemObject(cl_command_queue q, cl_mem buf, void* ptr, cl_uint nw, const cl_event* we, cl_event* ev) const;
+  cl_int flush(cl_command_queue q) const;
+  cl_int getEventInfo(cl_event e, cl_uint name, size_t sz, void* val, size_t* rqn) const;
+  cl_int setEventCallback(cl_event e, cl_uint type, void(CL_CALLBACK* cb)(cl_event, cl_int, void*),
+                          void* ud) const;
   cl_int finish(cl_command_queue q) const;
   cl_int releaseKernel(cl_kernel k) const;
   cl_int releaseProgram(cl_program p) const;
   cl_int releaseMemObject(cl_mem m) const;
+  cl_int releaseEvent(cl_event e) const;
   cl_int releaseQueue(cl_command_queue q) const;
   cl_int releaseContext(cl_context c) const;
 
@@ -100,10 +110,14 @@ private:
   void* p_enqueueWriteBuffer = nullptr;
   void* p_enqueueMapBuffer = nullptr;
   void* p_enqueueUnmap = nullptr;
+  void* p_flush = nullptr;
+  void* p_getEventInfo = nullptr;
+  void* p_setEventCallback = nullptr;
   void* p_finish = nullptr;
   void* p_releaseKernel = nullptr;
   void* p_releaseProgram = nullptr;
   void* p_releaseMem = nullptr;
+  void* p_releaseEvent = nullptr;
   void* p_releaseQueue = nullptr;
   void* p_releaseContext = nullptr;
 };

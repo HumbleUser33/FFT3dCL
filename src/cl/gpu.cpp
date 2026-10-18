@@ -4,7 +4,35 @@
 #include <atomic>
 #include <cstdio>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 namespace fft3dcl {
+
+namespace {
+// The driver's blocking calls (clFinish, clEnqueueReadBuffer with CL_TRUE,
+// clWaitForEvents) busy-wait on Windows: they keep a whole CPU core spinning
+// while the GPU works. One frame of this filter is tens of milliseconds of GPU
+// time, and the encoder needs those cycles, so the wait is done on a kernel32
+// event that the OpenCL completion callback signals.
+void CL_CALLBACK gpuDone(cl_event, cl_int, void* ud) { SetEvent(static_cast<HANDLE>(ud)); }
+
+bool waitForEvent(const ClApi& api, cl_command_queue queue, cl_event ev) {
+  bool ok = false;
+  HANDLE h = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!h)
+    return api.finish(queue) == CL_SUCCESS;
+  if (api.setEventCallback(ev, CL_COMPLETE, gpuDone, h) == CL_SUCCESS)
+    ok = WaitForSingleObject(h, 120000) == WAIT_OBJECT_0; // only a dead driver waits longer
+  CloseHandle(h);
+  api.releaseEvent(ev);
+  if (!ok)
+    ok = api.finish(queue) == CL_SUCCESS; // driver never called back: fall back
+  return ok;
+}
+} // namespace
 
 static cl_mem mkBuf(GpuContext& c, cl_uint flags, size_t sz, const void* host) {
   cl_int e = 0;
@@ -430,10 +458,14 @@ bool GpuRef::process(const std::vector<int>& window, std::vector<float>& out) {
   }
   out.assign(g_.width * g_.height, 0.0f);
   StageTime t(kReadback);
-  cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufOut_, CL_TRUE, 0,
-                                         sizeof(float) * out.size(), out.data(), 0, nullptr,
-                                         nullptr);
-  if (e != CL_SUCCESS) {
+  cl_event ev = nullptr;
+  cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufOut_, CL_FALSE, 0, sizeof(float) * out.size(),
+                                         out.data(), 0, nullptr, &ev);
+  if (e != CL_SUCCESS || !ev) {
+    err_ = "readback failed";
+    return false;
+  }
+  if (!waitForEvent(ctx_->api, ctx_->queue, ev)) {
     err_ = "readback failed";
     return false;
   }
@@ -449,9 +481,14 @@ bool GpuRef::processRaw(const std::vector<int>& window, void* dst, size_t bytes)
       return false;
   }
   StageTime t(kReadback);
-  cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, dst, 0, nullptr,
-                                         nullptr);
-  if (e != CL_SUCCESS) {
+  cl_event ev = nullptr;
+  cl_int e =
+      ctx_->api.enqueueReadBuffer(ctx_->queue, bufRaw_, CL_FALSE, 0, bytes, dst, 0, nullptr, &ev);
+  if (e != CL_SUCCESS || !ev) {
+    err_ = "readback failed";
+    return false;
+  }
+  if (!waitForEvent(ctx_->api, ctx_->queue, ev)) {
     err_ = "readback failed";
     return false;
   }

@@ -28,10 +28,14 @@ bool ClApi::load() {
   GET(p_enqueueWriteBuffer, "clEnqueueWriteBuffer")
   GET(p_enqueueMapBuffer, "clEnqueueMapBuffer")
   GET(p_enqueueUnmap, "clEnqueueUnmapMemObject")
+  GET(p_flush, "clFlush")
+  GET(p_getEventInfo, "clGetEventInfo")
+  GET(p_setEventCallback, "clSetEventCallback")
   GET(p_finish, "clFinish")
   GET(p_releaseKernel, "clReleaseKernel")
   GET(p_releaseProgram, "clReleaseProgram")
   GET(p_releaseMem, "clReleaseMemObject")
+  GET(p_releaseEvent, "clReleaseEvent")
   GET(p_releaseQueue, "clReleaseCommandQueue")
   GET(p_releaseContext, "clReleaseContext")
 #undef GET
@@ -58,6 +62,9 @@ typedef cl_int(CL_API_CALL* fn_wr)(cl_command_queue, cl_mem, cl_bool, size_t, si
 typedef void*(CL_API_CALL* fn_map)(cl_command_queue, cl_mem, cl_bool, cl_uint, size_t, size_t, cl_uint, const cl_event*, cl_event*, cl_int*);
 typedef cl_int(CL_API_CALL* fn_unmap)(cl_command_queue, cl_mem, void*, cl_uint, const cl_event*, cl_event*);
 typedef cl_int(CL_API_CALL* fn_fin)(cl_command_queue);
+typedef cl_int(CL_API_CALL* fn_flush)(cl_command_queue);
+typedef cl_int(CL_API_CALL* fn_evInfo)(cl_event, cl_uint, size_t, void*, size_t*);
+typedef cl_int(CL_API_CALL* fn_evCb)(cl_event, cl_uint, void(CL_CALLBACK*)(cl_event, cl_int, void*), void*);
 typedef cl_int(CL_API_CALL* fn_rel)(void*);
 
 cl_int ClApi::getPlatformIDs(cl_uint n, cl_platform_id* p, cl_uint* g) const {
@@ -105,19 +112,26 @@ cl_int ClApi::enqueueReadBuffer(cl_command_queue q, cl_mem b, cl_bool bl, size_t
 cl_int ClApi::enqueueWriteBuffer(cl_command_queue q, cl_mem b, cl_bool bl, size_t o, size_t s, const void* d, cl_uint nw, const cl_event* we, cl_event* ev) const {
   return ((fn_wr)p_enqueueWriteBuffer)(q, b, bl, o, s, d, nw, we, ev);
 }
-cl_int ClApi::enqueueMapBuffer(cl_command_queue q, cl_mem b, cl_bool bl, cl_uint m, size_t o, size_t s, cl_uint nw, const cl_event* we, cl_event* ev) const {
-  // returns the mapped pointer; err via ev not used here (see GpuRef usage)
-  cl_int err = 0;
-  void* p = ((fn_map)p_enqueueMapBuffer)(q, b, bl, m, o, s, nw, we, ev, &err);
-  return err == CL_SUCCESS && p ? CL_SUCCESS : (err ? err : -1);
+void* ClApi::enqueueMapBuffer(cl_command_queue q, cl_mem b, cl_bool bl, cl_uint m, size_t o, size_t s, cl_uint nw, const cl_event* we, cl_event* ev, cl_int* err) const {
+  cl_int local = 0;
+  return ((fn_map)p_enqueueMapBuffer)(q, b, bl, m, o, s, nw, we, ev, err ? err : &local);
 }
 cl_int ClApi::enqueueUnmapMemObject(cl_command_queue q, cl_mem b, void* p, cl_uint nw, const cl_event* we, cl_event* ev) const {
   return ((fn_unmap)p_enqueueUnmap)(q, b, p, nw, we, ev);
+}
+cl_int ClApi::flush(cl_command_queue q) const { return ((fn_flush)p_flush)(q); }
+cl_int ClApi::getEventInfo(cl_event e, cl_uint name, size_t sz, void* val, size_t* rqn) const {
+  return ((fn_evInfo)p_getEventInfo)(e, name, sz, val, rqn);
+}
+cl_int ClApi::setEventCallback(cl_event e, cl_uint type, void(CL_CALLBACK* cb)(cl_event, cl_int, void*),
+                               void* ud) const {
+  return ((fn_evCb)p_setEventCallback)(e, type, cb, ud);
 }
 cl_int ClApi::finish(cl_command_queue q) const { return ((fn_fin)p_finish)(q); }
 cl_int ClApi::releaseKernel(cl_kernel k) const { return ((fn_rel)p_releaseKernel)(k); }
 cl_int ClApi::releaseProgram(cl_program p) const { return ((fn_rel)p_releaseProgram)(p); }
 cl_int ClApi::releaseMemObject(cl_mem m) const { return ((fn_rel)p_releaseMem)(m); }
+cl_int ClApi::releaseEvent(cl_event e) const { return ((fn_rel)p_releaseEvent)(e); }
 cl_int ClApi::releaseQueue(cl_command_queue q) const { return ((fn_rel)p_releaseQueue)(q); }
 cl_int ClApi::releaseContext(cl_context c) const { return ((fn_rel)p_releaseContext)(c); }
 
