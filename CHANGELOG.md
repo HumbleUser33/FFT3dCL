@@ -28,6 +28,60 @@ lighter on the processor and on graphics memory.
 - **The pictures did not change at all.** The v1.0.0 build and this one were
   compared sample by sample on 8, 10 and 16 bit material: no sample differs.
 
+### Performance report
+
+24 frames of a real 4K HDR10 clip (3840x2160, 10 bit) with
+`sigma=3, bt=4, bw=32, bh=32, ow=16, oh=16, sharpen=0.4`, on an NVIDIA RTX 3050
+4 GB, three runs of each build.
+
+| Measure | v1.0.0 | v1.1.0 |
+|---|---|---|
+| time for the 24 frames | 3.28 s | 1.68 s |
+| speed | 7.3 fps | 14.3 fps |
+| processor time used by the whole run | 9.85 s | 8.51 s |
+| processor time the filter itself adds | about 2.4 s (99 ms per frame) | about 1.0 s (43 ms per frame) |
+| graphics memory held by one filter | 345 MiB | 281 MiB |
+| graphics memory peak, whole PC | 3220 MiB | 2043 MiB |
+| program memory peak | 3425 MiB | 2955 MiB |
+
+Decoding the same clip without the filter takes 7.48 s of processor time, which
+is what the "the filter itself adds" line is measured against.
+
+Where the time inside one frame goes now, and where it went before:
+
+| Step, per frame | v1.0.0 | v1.1.0 |
+|---|---|---|
+| forward FFT (including the pixel conversion) | 43.6 ms | 8.7 ms |
+| temporal filter | 5.4 ms | 5.2 ms |
+| inverse FFT | 42.1 ms | 9.4 ms |
+| putting the blocks back together | 1.7 ms | 1.6 ms |
+| sending the frame to the graphics card | 2.9 ms | 2.7 ms |
+| reading the result back | 3.5 ms | 3.0 ms |
+| copying the planes the filter does not touch | 1.5 ms | 1.7 ms |
+| **graphics card work per frame** | **92.8 ms** | **24.9 ms** |
+
+Each change on its own, always compared with the build just before it, in the
+same session. The machine itself moves by a few percent between runs.
+
+| Change | wall time | speed | pictures |
+|---|---|---|---|
+| rotation factors computed once per group | 3.60 → 2.51 s | 6.7 → 9.6 fps | identical |
+| one padded column, removes a memory bank conflict | 3.32 → 2.14 s | 7.2 → 11.2 fps | identical |
+| all rows, then all columns, in a single pass | 3.37 → 1.84 s | 7.1 → 13.0 fps | identical |
+| skip the mirror columns, larger work groups | 3.46 → 1.66 s | 6.9 → 14.6 fps | identical |
+| pixel conversion inside the kernels | 1.80 → 1.71 s | 13.3 → 14.1 fps | identical, −64 MiB |
+| waiting quietly instead of spinning | unchanged | 13.6 → 14.0 fps | identical, CPU 8.80 → 8.37 s |
+
+The last two lines are not about speed: their gain is memory (64 MiB less per
+filter, which matters on a 4 GB card) and processor time (18 ms per frame back
+for the encode that follows).
+
+Nothing moved by a single unit. `tools/ab_dll.ps1` renders the same clip with
+both builds and compares every sample: 100 % identical, at 8, 10 and 16 bit, at
+4K and at 1080p. Against the original FFT3dGPU 0.8.6 the fidelity is unchanged
+too: 97.14 % of samples equal with the default settings, 96.30 % with `plane=4`,
+94.83 % at 10 bit, 100 % with `bt=-1`.
+
 ## v1.0.0 — 2026-10-18
 
 First release of FFT3dCL, a modern port of the FFT3dGPU 0.8.6 denoiser to a
