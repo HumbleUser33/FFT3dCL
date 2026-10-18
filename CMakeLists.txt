@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(fft3dcl SHARED
   src/fft3dcl.cpp
+  src/timing.cpp
   src/cpu/fft.cpp
   src/cpu/tables.cpp
   src/cpu/reference.cpp

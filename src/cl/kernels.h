@@ -33,45 +33,75 @@ inline void wienner(float* re, float* im, float sigmaX, float sigmaY, float beta
   *im *= mulFac;
 }
 
-// In-place radix-2 DIT FFT of length n (power of two) over strided
-// local-memory elements, cooperatively by all work-items of the group.
-// sign=-1 forward, sign=+1 inverse (with 1/n scaling).
+// Twiddle factors for one 1D FFT length, computed once per work-group instead
+// of once per butterfly. The expression is character-identical to the one the
+// butterflies used to evaluate, so every value is bit-for-bit the same; only
+// the number of cos/sin calls changes (n-1 per group instead of n/2*log2(n)
+// per row, i.e. about 80 times fewer for a 32x32 block).
+// Stage len (2, 4, ... n) starts at offset len/2-1 and holds len/2 entries,
+// so the table for length n needs n-1 entries.
 __attribute__((always_inline))
-void fft1d(__local float2* restrict base, int stride, int n, int sign, int tid, int wg) {
+void tw_fill(__local float2* wt, int n, int sign, int tid, int wg) {
+  for (int len = 2; len <= n; len <<= 1) {
+    int h = len >> 1;
+    int step = n / len;
+    for (int j = tid; j < h; j += wg) {
+      float ang = (float)sign * 2.0f * PI * (float)(j * step) / (float)n;
+      wt[(h - 1) + j] = (float2)(cos(ang), sin(ang));
+    }
+  }
+}
+
+// Radix-2 DIT FFT of length n (power of two), done for R transforms at once so
+// every work-item has work in every stage and the group only needs one barrier
+// per stage instead of one per transform and stage (12 barriers per 32x32 block
+// instead of 384). The butterflies, their twiddle factors and the order of the
+// arithmetic are exactly the ones of the previous per-transform version, so the
+// result is bit-identical; only the mapping to work-items changed.
+// Element k of transform r lives at L[r * rowPitch + k * stride].
+__attribute__((always_inline))
+void fft_batch(__local float2* restrict L, int R, int rowPitch, int stride, int n, int sign,
+               int tid, int wg, __local const float2* restrict wt) {
   int bits = 0;
   while ((1 << bits) < n) bits++;
-  // bit-reversal permutation: each disjoint pair (i, rev(i)), i < rev(i),
-  // is swapped by exactly one work-item.
-  for (int i = tid; i < n; i += wg) {
-    int r = 0;
+  // bit-reversal permutation: each disjoint pair (k, rev(k)), k < rev(k), of
+  // every transform is swapped by exactly one work-item.
+  for (int i = tid; i < R * n; i += wg) {
+    int r = i / n, k = i - r * n;
+    int rev = 0;
     for (int b = 0; b < bits; b++)
-      if (i & (1 << b)) r |= 1 << (bits - 1 - b);
-    if (i < r) {
-      float2 t = base[i * stride];
-      base[i * stride] = base[r * stride];
-      base[r * stride] = t;
+      if (k & (1 << b)) rev |= 1 << (bits - 1 - b);
+    if (k < rev) {
+      __local float2* pa = &L[r * rowPitch + k * stride];
+      __local float2* pc = &L[r * rowPitch + rev * stride];
+      float2 t = *pa;
+      *pa = *pc;
+      *pc = t;
     }
   }
   barrier(CLK_LOCAL_MEM_FENCE);
   for (int len = 2; len <= n; len <<= 1) {
     int h = len >> 1;
-    int step = n / len;
-    for (int bi = tid; bi < n / 2; bi += wg) {
-      int blk = bi / h, j = bi - blk * h;
-      float ang = (float)sign * 2.0f * PI * (float)(j * step) / (float)n;
-      float2 w = (float2)(cos(ang), sin(ang));
+    for (int bi = tid; bi < R * (n / 2); bi += wg) {
+      int r = bi / (n / 2), q = bi - r * (n / 2);
+      int blk = q / h, j = q - blk * h;
+      float2 w = wt[(h - 1) + j];
       int p = blk * len + j;
-      float2 a = base[p * stride];
-      float2 t = cmul(w, base[(p + h) * stride]);
-      base[p * stride] = a + t;
-      base[(p + h) * stride] = a - t;
+      __local float2* pa = &L[r * rowPitch + p * stride];
+      __local float2* pb = &L[r * rowPitch + (p + h) * stride];
+      float2 a = *pa;
+      float2 t = cmul(w, *pb);
+      *pa = a + t;
+      *pb = a - t;
     }
     barrier(CLK_LOCAL_MEM_FENCE);
   }
   if (sign > 0) {
     float invn = 1.0f / (float)n;
-    for (int i = tid; i < n; i += wg)
-      base[i * stride] *= invn;
+    for (int i = tid; i < R * n; i += wg) {
+      int r = i / n, k = i - r * n;
+      L[r * rowPitch + k * stride] *= invn;
+    }
     barrier(CLK_LOCAL_MEM_FENCE);
   }
 }
@@ -79,12 +109,14 @@ void fft1d(__local float2* restrict base, int stride, int n, int sign, int tid, 
 // ---- debug: single-row FFT -------------------------------------------
 __kernel void fft1d_debug(__global const float* src, __global float2* dst, int n) {
   __local float2 L[LSZ];
+  __local float2 WT[LSZ];
   int tid = get_local_id(0);
   int wg = get_local_size(0);
   for (int i = tid; i < n; i += wg)
     L[i] = (float2)(src[i], 0.0f);
+  tw_fill(WT, n, -1, tid, wg);
   barrier(CLK_LOCAL_MEM_FENCE);
-  fft1d(L, 1, n, -1, tid, wg);
+  fft_batch(L, 1, 0, 1, n, -1, tid, wg, WT);
   for (int i = tid; i < n; i += wg)
     dst[i] = L[i];
 }
@@ -99,7 +131,10 @@ __kernel void fft2d_fwd(__global const float* restrict plane,
                         __global const float* restrict win,
                         int W, int H, int bw, int bh, int fbw, int nb,
                         float chromaNorm) {
-  __local float2 L[LSZ]; // LSZ = bw*bh, set via -D at build time
+  __local float2 L[LSZP]; // LSZP = (bw+1)*bh: the spare column (LP = bw+1) shifts
+                          // every row by one element, which breaks the 32-way
+                          // bank conflict the strided column FFTs used to hit
+  __local float2 WT[2 * LSW]; // twiddles: LSW for the rows (bw), LSW for the columns (bh)
   int b = get_group_id(0);
   if (b >= nb) return;
   int tid = get_local_id(0);
@@ -110,20 +145,25 @@ __kernel void fft2d_fwd(__global const float* restrict plane,
     int ly = idx / bw, lx = idx - ly * bw;
     float v = plane[mirror_i(y0 + ly, H) * W + mirror_i(x0 + lx, W)];
     v -= chromaNorm;
-    L[idx] = (float2)(v * win[idx], 0.0f);
+    L[ly * LP + lx] = (float2)(v * win[idx], 0.0f);
   }
+  tw_fill(WT, bw, -1, tid, wg);
+  tw_fill(&WT[LSW], bh, -1, tid, wg);
   barrier(CLK_LOCAL_MEM_FENCE);
-  for (int r = 0; r < bh; r++)
-    fft1d(&L[r * bw], 1, bw, -1, tid, wg);
-  for (int c = 0; c < bw; c++)
-    fft1d(&L[c], bw, bh, -1, tid, wg);
+  fft_batch(L, bh, LP, 1, bw, -1, tid, wg, WT);        // every row in one pass
+  // Only the first fbw columns are ever stored (the rest is the Hermitian
+  // mirror), so the remaining bw-fbw column transforms are not computed.
+  fft_batch(L, fbw, 1, LP, bh, -1, tid, wg, &WT[LSW]); // stored columns only
   __global float2* dst = &spec[(long)b * fbw * bh];
   for (int idx = tid; idx < fbw * bh; idx += wg) {
     int r = idx / fbw, c = idx - r * fbw;
-    dst[idx] = L[r * bw + c];
+    dst[idx] = L[r * LP + c];
   }
 }
-
+)CL"
+// MSVC truncates a single string literal past 64 KiB, so the source is handed
+// over as three adjacent literals that the compiler concatenates.
+R"CL(
 // ---- temporal filter + sharpen ----------------------------------------
 // One work-item per (block, frequency bin). BM selects the temporal mode
 // (compile-time -DBM=1|2|3|4|0|-1). DG/-DPAT/-DSHP enable degrid,
@@ -317,7 +357,8 @@ __kernel void fft2d_inv(__global const float2* restrict spec,
                         __global const float* restrict winB,
                         __global const uchar* restrict par,
                         int bw, int bh, int fbw, int nb) {
-  __local float2 L[LSZ]; // LSZ = bw*bh, set via -D at build time
+  __local float2 L[LSZP]; // padded layout, see fft2d_fwd
+  __local float2 WT[2 * LSW]; // twiddles: LSW for the rows (bw), LSW for the columns (bh)
   int b = get_group_id(0);
   if (b >= nb) return;
   int tid = get_local_id(0);
@@ -326,24 +367,26 @@ __kernel void fft2d_inv(__global const float2* restrict spec,
   __global const float2* src = &spec[(long)b * fbw * bh];
   for (int idx = tid; idx < fbw * bh; idx += wg) {
     int r = idx / fbw, c = idx - r * fbw;
-    L[r * bw + c] = src[idx];
+    L[r * LP + c] = src[idx];
   }
+  tw_fill(WT, bw, +1, tid, wg);
+  tw_fill(&WT[LSW], bh, +1, tid, wg);
   barrier(CLK_LOCAL_MEM_FENCE);
   // Hermitian completion: L[r][c] = conj(L[(bh-r)%bh][bw-c]) for c >= fbw
   for (int idx = tid; idx < (bw - fbw) * bh; idx += wg) {
     int r = idx / (bw - fbw), c = idx - r * (bw - fbw) + fbw;
     int rm = (bh - r) % bh, cm = bw - c;
-    float2 v = L[rm * bw + cm];
-    L[r * bw + c] = (float2)(v.x, -v.y);
+    float2 v = L[rm * LP + cm];
+    L[r * LP + c] = (float2)(v.x, -v.y);
   }
   barrier(CLK_LOCAL_MEM_FENCE);
-  for (int r = 0; r < bh; r++)
-    fft1d(&L[r * bw], 1, bw, +1, tid, wg);
-  for (int c = 0; c < bw; c++)
-    fft1d(&L[c], bw, bh, +1, tid, wg);
+  fft_batch(L, bh, LP, 1, bw, +1, tid, wg, WT);       // every row in one pass
+  fft_batch(L, bw, 1, LP, bh, +1, tid, wg, &WT[LSW]); // every column in one pass
   __global float* dst = &blocks[(long)b * bw * bh];
-  for (int idx = tid; idx < bw * bh; idx += wg)
-    dst[idx] = L[idx].x * win[idx];
+  for (int idx = tid; idx < bw * bh; idx += wg) {
+    int r = idx / bw, c = idx - r * bw;
+    dst[idx] = L[r * LP + c].x * win[idx];
+  }
 }
 
 // ---- overlap-add synthesis -------------------------------------------

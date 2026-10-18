@@ -123,10 +123,12 @@ int main(int argc, char** argv) {
   const char* ksrc = kKernelSource();
   cl_program prog = gpu.api.createProgramWithSource(gpu.context, 1, &ksrc, nullptr, &e);
   CHECK(e);
-  char opts[160];
+  char opts[256];
   snprintf(opts, sizeof(opts),
-           "-DLSZ=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d -cl-fp32-correctly-rounded-divide-sqrt",
-           bw * bh, ip.bm, ip.degridOn ? 1 : 0, ip.usePattern ? 1 : 0, ip.sharpenOn ? 1 : 0);
+           "-DLSZ=%d -DLSW=%d -DLP=%d -DLSZP=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d "
+           "-cl-fp32-correctly-rounded-divide-sqrt",
+           bw * bh, bw > bh ? bw : bh, bw + 1, (bw + 1) * bh, ip.bm, ip.degridOn ? 1 : 0,
+           ip.usePattern ? 1 : 0, ip.sharpenOn ? 1 : 0);
   e = gpu.api.buildProgram(prog, 1, &gpu.device, opts, nullptr, nullptr);
   if (e != CL_SUCCESS) {
     char log[8192] = {};

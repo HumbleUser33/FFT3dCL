@@ -1,5 +1,6 @@
 #include "gpu.h"
 #include "kernels.h"
+#include "../timing.h"
 #include <atomic>
 #include <cstdio>
 
@@ -34,12 +35,22 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   fbw_ = cpu.fbw();
   planeSize_ = fbw_ * p_.bh;
 
-  // FFT work-group: one block per group, max(bw,bh) work-items.
-  wgFft_ = (size_t)(p_.bw > p_.bh ? p_.bw : p_.bh);
-  if (wgFft_ > ctx.maxWorkGroupSize) {
+  // FFT work-group: one block per group. The batched FFT has bw*bh/2 butterflies
+  // per stage, so a group bigger than max(bw,bh) keeps every work-item busy;
+  // 4x measured about 8% faster at 4K with 32x32 blocks, and never leaves
+  // work-items without work because the loops below all stride by the group size.
+  size_t m = (size_t)(p_.bw > p_.bh ? p_.bw : p_.bh);
+  if (m > ctx.maxWorkGroupSize) {
     err_ = "block size exceeds device max work-group size";
     return;
   }
+  wgFft_ = 4 * m;
+  if (wgFft_ > (size_t)p_.bw * p_.bh / 2)
+    wgFft_ = (size_t)p_.bw * p_.bh / 2;
+  if (wgFft_ < m)
+    wgFft_ = m;
+  if (wgFft_ > ctx.maxWorkGroupSize)
+    wgFft_ = ctx.maxWorkGroupSize;
   if ((size_t)p_.bw * p_.bh * 8 > 48u * 1024) {
     // Conservative local-memory bound (all target GPUs provide >=48KB...
     // actually >=32KB; 64x64 blocks need 32KB).
@@ -56,11 +67,12 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
     err_ = "clCreateProgramWithSource failed";
     return;
   }
-  char opts[160];
+  char opts[256];
   snprintf(opts, sizeof(opts),
-           "-DLSZ=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d -cl-fp32-correctly-rounded-divide-sqrt",
-           p_.bw * p_.bh, p_.bm, p_.degridOn ? 1 : 0, p_.usePattern ? 1 : 0,
-           p_.sharpenOn ? 1 : 0);
+           "-DLSZ=%d -DLSW=%d -DLP=%d -DLSZP=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d "
+           "-cl-fp32-correctly-rounded-divide-sqrt",
+           p_.bw * p_.bh, p_.bw > p_.bh ? p_.bw : p_.bh, p_.bw + 1, (p_.bw + 1) * p_.bh, p_.bm,
+           p_.degridOn ? 1 : 0, p_.usePattern ? 1 : 0, p_.sharpenOn ? 1 : 0);
   e = ctx.api.buildProgram(prog_, 1, &ctx.device, opts, nullptr, nullptr);
   if (e != CL_SUCCESS) {
     char log[4096] = {};
@@ -257,8 +269,13 @@ bool GpuRef::launchFwd(cl_mem spec) {
   ctx_->api.setKernelArg(kFwd_, 0, sizeof(cl_mem), &bufPlane_);
   ctx_->api.setKernelArg(kFwd_, 3, sizeof(cl_mem), &spec);
   size_t goff = 0, gsize = (size_t)nb_ * wgFft_, lsize = wgFft_;
+  long long t0 = timeEnabled() ? nowNs() : 0;
   cl_int e = ctx_->api.enqueueNDRange(ctx_->queue, kFwd_, 1, &goff, &gsize, &lsize, 0, nullptr,
                                       nullptr);
+  if (t0) { // diagnostic mode: drain the queue to time the kernel itself
+    ctx_->api.finish(ctx_->queue);
+    addStage(kGpuFwd, nowNs() - t0);
+  }
   if (e != CL_SUCCESS) {
     err_ = "fft2d_fwd launch failed";
     return false;
@@ -316,13 +333,18 @@ bool GpuRef::forward(int fn, const std::vector<float>& plane) {
     err_ = "GPU spectra alloc failed";
     return false;
   }
-  cl_int e = ctx_->api.enqueueWriteBuffer(ctx_->queue, bufPlane_, CL_TRUE, 0,
-                                          sizeof(float) * g_.width * g_.height, plane.data(), 0,
-                                          nullptr, nullptr);
+  cl_int e;
+  {
+    StageTime t(kUpload);
+    e = ctx_->api.enqueueWriteBuffer(ctx_->queue, bufPlane_, CL_TRUE, 0,
+                                     sizeof(float) * g_.width * g_.height, plane.data(), 0, nullptr,
+                                     nullptr);
+  }
   if (e != CL_SUCCESS) {
     err_ = "enqueueWriteBuffer failed";
     return false;
   }
+  StageTime t(kFwd);
   return launchFwd(spec);
 }
 
@@ -334,12 +356,17 @@ bool GpuRef::forwardRaw(int fn, const void* raw, size_t bytes) {
     err_ = "GPU spectra alloc failed";
     return false;
   }
-  cl_int e = ctx_->api.enqueueWriteBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, (void*)raw, 0,
-                                          nullptr, nullptr);
+  cl_int e;
+  {
+    StageTime t(kUpload);
+    e = ctx_->api.enqueueWriteBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, (void*)raw, 0,
+                                     nullptr, nullptr);
+  }
   if (e != CL_SUCCESS) {
     err_ = "enqueueWriteBuffer failed";
     return false;
   }
+  StageTime t(kFwd);
   if (!unpack())
     return false;
   return launchFwd(spec);
@@ -394,20 +421,35 @@ bool GpuRef::runKernels(const std::vector<int>& window) {
   ctx_->api.setKernelArg(kFil_, 2, sizeof(cl_mem), &s2);
   ctx_->api.setKernelArg(kFil_, 3, sizeof(cl_mem), &s3);
   size_t gsFil = (size_t)nb_ * planeSize_;
+  long long tFil = timeEnabled() ? nowNs() : 0;
   e = ctx_->api.enqueueNDRange(ctx_->queue, kFil_, 1, nullptr, &gsFil, nullptr, 0, nullptr, nullptr);
+  if (tFil) {
+    ctx_->api.finish(ctx_->queue);
+    addStage(kGpuFil, nowNs() - tFil);
+  }
   if (e != CL_SUCCESS) {
     err_ = "filter launch failed";
     return false;
   }
   size_t goff = 0, gsize = (size_t)nb_ * wgFft_, lsize = wgFft_;
   ctx_->api.setKernelArg(kInv_, 0, sizeof(cl_mem), &bufFilt_);
+  long long tInv = timeEnabled() ? nowNs() : 0;
   e = ctx_->api.enqueueNDRange(ctx_->queue, kInv_, 1, &goff, &gsize, &lsize, 0, nullptr, nullptr);
+  if (tInv) {
+    ctx_->api.finish(ctx_->queue);
+    addStage(kGpuInv, nowNs() - tInv);
+  }
   if (e != CL_SUCCESS) {
     err_ = "fft2d_inv launch failed";
     return false;
   }
   size_t gs2[2] = {(size_t)g_.width, (size_t)g_.height};
+  long long tSyn = timeEnabled() ? nowNs() : 0;
   e = ctx_->api.enqueueNDRange(ctx_->queue, kSyn_, 2, nullptr, gs2, nullptr, 0, nullptr, nullptr);
+  if (tSyn) {
+    ctx_->api.finish(ctx_->queue);
+    addStage(kGpuSyn, nowNs() - tSyn);
+  }
   if (e != CL_SUCCESS) {
     err_ = "synthesize launch failed";
     return false;
@@ -418,9 +460,13 @@ bool GpuRef::runKernels(const std::vector<int>& window) {
 bool GpuRef::process(const std::vector<int>& window, std::vector<float>& out) {
   if (!ok_)
     return false;
-  if (!runKernels(window))
-    return false;
+  {
+    StageTime t(kRun);
+    if (!runKernels(window))
+      return false;
+  }
   out.assign(g_.width * g_.height, 0.0f);
+  StageTime t(kReadback);
   cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufOut_, CL_TRUE, 0,
                                          sizeof(float) * out.size(), out.data(), 0, nullptr,
                                          nullptr);
@@ -434,8 +480,12 @@ bool GpuRef::process(const std::vector<int>& window, std::vector<float>& out) {
 bool GpuRef::processRaw(const std::vector<int>& window, void* dst, size_t bytes) {
   if (!ok_ || !rawPath_)
     return false;
-  if (!runKernels(window))
-    return false;
+  {
+    StageTime t(kRun);
+    if (!runKernels(window))
+      return false;
+  }
+  StageTime t(kReadback);
   if (!pack())
     return false;
   cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, dst, 0, nullptr,

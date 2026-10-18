@@ -10,6 +10,7 @@
 #include "params.h"
 #include "cpu/reference.h"
 #include "cl/gpu.h"
+#include "timing.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -87,6 +88,7 @@ void logGpuUsage(VSCore* core, const VSAPI* vsapi, const char* what) {
 
 void VS_CC fft3dclCreate(const VSMap* in, VSMap* out, void* userData, VSCore* core,
                           const VSAPI* vsapi) {
+  timeInit();
   int err = 0;
   VSNode* clip = vsapi->mapGetNode(in, "clip", 0, &err);
   if (err || !clip) {
@@ -282,26 +284,40 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
   if (activationReason != arAllFramesReady)
     return nullptr;
 
-  const VSFrame* src = vsapi->getFrameFilter(n, clip, frameCtx);
-  VSFrame* dst = vsapi->newVideoFrame(&vi.format, vi.width, vi.height, src, core);
-
-  // Untouched planes are copied straight from the source frame.
-  for (int p = 0; p < vi.format.numPlanes; p++) {
-    bool processed = false;
-    for (int q : inst->processedPlanes)
-      if (q == p) { processed = true; break; }
-    if (processed)
-      continue;
-    const uint8_t* sp = vsapi->getReadPtr(src, p);
-    uint8_t* dp = vsapi->getWritePtr(dst, p);
-    ptrdiff_t ss = vsapi->getStride(src, p), ds = vsapi->getStride(dst, p);
-    int h = vsapi->getFrameHeight(src, p);
-    int row = vsapi->getFrameWidth(src, p) * vi.format.bytesPerSample;
-    for (int y = 0; y < h; y++)
-      memcpy(dp + y * ds, sp + y * ss, row);
+  const VSFrame* src = nullptr;
+  {
+    StageTime t(kFetch);
+    src = vsapi->getFrameFilter(n, clip, frameCtx);
+  }
+  VSFrame* dst = nullptr;
+  {
+    StageTime t(kAlloc);
+    dst = vsapi->newVideoFrame(&vi.format, vi.width, vi.height, src, core);
   }
 
+  // Untouched planes are copied straight from the source frame.
+  {
+    StageTime t(kChroma);
+    for (int p = 0; p < vi.format.numPlanes; p++) {
+      bool processed = false;
+      for (int q : inst->processedPlanes)
+        if (q == p) { processed = true; break; }
+      if (processed)
+        continue;
+      const uint8_t* sp = vsapi->getReadPtr(src, p);
+      uint8_t* dp = vsapi->getWritePtr(dst, p);
+      ptrdiff_t ss = vsapi->getStride(src, p), ds = vsapi->getStride(dst, p);
+      int h = vsapi->getFrameHeight(src, p);
+      int row = vsapi->getFrameWidth(src, p) * vi.format.bytesPerSample;
+      for (int y = 0; y < h; y++)
+        memcpy(dp + y * ds, sp + y * ss, row);
+    }
+  }
+
+  long long lockT0 = nowNs();
   std::lock_guard<std::mutex> lock(inst->mtx);
+  if (timeEnabled())
+    addStage(kLock, nowNs() - lockT0);
 
   for (size_t k = 0; k < inst->processedPlanes.size(); k++) {
     int p = inst->processedPlanes[k];
@@ -328,7 +344,11 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
         fn = clampFrame(fn, vi.numFrames);
         if (gpu.has(fn))
           return fn;
-        const VSFrame* fr = vsapi->getFrameFilter(fn, clip, frameCtx);
+        const VSFrame* fr = nullptr;
+        {
+          StageTime t(kFetch);
+          fr = vsapi->getFrameFilter(fn, clip, frameCtx);
+        }
         if (raw) {
           const uint8_t* sp = static_cast<const uint8_t*>(vsapi->getReadPtr(fr, p));
           ptrdiff_t ss = vsapi->getStride(fr, p);
@@ -384,6 +404,7 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
           vsapi->logMessage(mtWarning, msg, core);
         }
       } else {
+        StageTime t(kPrune);
         if (ip.bm >= 2) {
           // Keep only what the next requests can reuse: the current window plus
           // one frame of slack. 3*bt+1 entries cost 1.4 GiB of device memory at
@@ -403,11 +424,18 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
       auto it = cache.find(fn);
       if (it != cache.end())
         return it->second;
-      const VSFrame* fr = vsapi->getFrameFilter(fn, clip, frameCtx);
+      const VSFrame* fr = nullptr;
+      {
+        StageTime t(kFetch);
+        fr = vsapi->getFrameFilter(fn, clip, frameCtx);
+      }
       inst->planeBuf.clear();
       ref.upload(vsapi->getReadPtr(fr, p), vsapi->getStride(fr, p), inst->planeBuf);
       vsapi->freeFrame(fr);
-      auto s = ref.computeSpectra(inst->planeBuf);
+      auto s = [&] {
+        StageTime t(kFwd); // CPU path: the forward FFT lives here
+        return ref.computeSpectra(inst->planeBuf);
+      }();
       cache[fn] = s;
       return s;
     };
@@ -421,16 +449,25 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
     }
 
     inst->outBuf.clear();
-    ref.filterAndSynthesize(window, inst->outBuf);
-    ref.download(inst->outBuf, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
+    {
+      StageTime t(kRun); // CPU path: temporal filter + inverse + synthesis
+      ref.filterAndSynthesize(window, inst->outBuf);
+    }
+    {
+      StageTime t(kReadback); // CPU path: float -> pixels
+      ref.download(inst->outBuf, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
+    }
 
     // Prune the spectra cache around the current request (same window as GPU).
-    if (ip.bm >= 2) {
-      int lo = n - ip.current - 1, hi = n - ip.current + ip.bt;
-      for (auto it = cache.begin(); it != cache.end();)
-        it = (it->first < lo || it->first > hi) ? cache.erase(it) : std::next(it);
-    } else if (ip.bm != 0 && !cache.empty()) {
-      cache.clear();
+    {
+      StageTime t(kPrune);
+      if (ip.bm >= 2) {
+        int lo = n - ip.current - 1, hi = n - ip.current + ip.bt;
+        for (auto it = cache.begin(); it != cache.end();)
+          it = (it->first < lo || it->first > hi) ? cache.erase(it) : std::next(it);
+      } else if (ip.bm != 0 && !cache.empty()) {
+        cache.clear();
+      }
     }
   }
 
@@ -442,6 +479,7 @@ void VS_CC fft3dclFree(void* instanceData, VSCore* core, const VSAPI* vsapi) {
   FilterInstance* inst = static_cast<FilterInstance*>(instanceData);
   vsapi->freeNode(inst->clip); // we own the dependency reference: give it back
   delete inst;
+  timeDump("instance released");
   logGpuUsage(core, vsapi, "released");
 }
 

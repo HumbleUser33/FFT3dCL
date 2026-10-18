@@ -27,6 +27,7 @@ env/
 *.y4m
 *.avi
 *.lwi
+*.ffindex
 *.pyo
 __pycache__/
 
