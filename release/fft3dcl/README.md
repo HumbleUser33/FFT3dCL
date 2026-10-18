@@ -104,3 +104,7 @@ Engine selection — **with no effect whatsoever on the denoising**:
 2. Mode 0 is deterministic (the original sometimes output black).
 3. A `device` parameter was added (engine selection only).
 4. `NVPerf` removed; `oldfft` kept.
+
+---
+
+Coded by Qwen 3.8 Flash Next IQ3_S, tested by a human
