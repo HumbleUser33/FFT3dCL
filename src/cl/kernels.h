@@ -377,6 +377,46 @@ __kernel void synthesize(__global const float* restrict blocks,
   }
   out[y * W + x] = sum + chromaNorm;
 }
+
+// Pixel conversion, done on the device so the host only has to copy bytes
+// instead of converting eight million pixels twice per frame. The maths matches
+// PlaneRef::upload/download exactly: same fp32 multiply, same clamp order, and
+// floor() before the cast so the rounding does not depend on the device's
+// float-to-integer conversion mode (a plain cast is round-to-nearest in OpenCL).
+__kernel void unpack_u8(__global const uchar* restrict raw, __global float* restrict plane,
+                        int n) {
+  int i = get_global_id(0);
+  if (i < n)
+    plane[i] = (float)raw[i] * (1.0f / 255.0f);
+}
+
+__kernel void unpack_u16(__global const ushort* restrict raw, __global float* restrict plane,
+                         int n, float norm) {
+  int i = get_global_id(0);
+  if (i < n)
+    plane[i] = (float)raw[i] * norm;
+}
+
+__kernel void pack_u8(__global const float* restrict plane, __global uchar* restrict raw,
+                      int n) {
+  int i = get_global_id(0);
+  if (i < n) {
+    float v = plane[i];
+    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    raw[i] = (uchar)floor(v * 255.0f + 0.5f);
+  }
+}
+
+__kernel void pack_u16(__global const float* restrict plane, __global ushort* restrict raw,
+                       int n, float invNorm, float maxPix) {
+  int i = get_global_id(0);
+  if (i < n) {
+    float v = plane[i] * invNorm;
+    v = v < maxPix ? v : maxPix;
+    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    raw[i] = (ushort)floor(v * 65535.0f + 0.5f);
+  }
+}
 )CL";
 }
 

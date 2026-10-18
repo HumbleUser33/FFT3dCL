@@ -271,7 +271,7 @@ The GPU path adds about 3.6 s of CPU for 24 frames, roughly 150 ms per frame,
 and it also stops the decoder from using all cores (6.5 down to 2.7) because one
 mutex covers the upload, the kernels and the download.
 
-Two fixes landed:
+Two fixes landed first:
 
 1. `download()` used `std::lround` per pixel, a library call that cannot be
    vectorized. Replacing it with `(uint16_t)(v * 65535.0f + 0.5f)` on a value
@@ -280,7 +280,40 @@ Two fixes landed:
    every frame; they are now reused.
 
 That took 24 frames from 4.51 s to 4.18 s wall and 11.89 s to 11.45 s of CPU.
-The next step is the same conversion moved to the GPU: upload the plane as raw
-16-bit and let a kernel expand it to float, and write the result back as 16-bit
-on the device, which would remove most of the 150 ms per frame and let the
-upload and download happen outside the mutex.
+
+## Pixel conversion moved to the GPU
+
+The remaining CPU cost was the conversion itself: every frame was read as 16-bit
+and turned into float on the CPU (8.3 million multiplies), and the result was
+turned back into 16-bit on the CPU. Three small kernels replace both passes:
+
+- `unpack_u8` / `unpack_u16`: the raw bytes of the source plane become the float
+  plane the forward FFT reads.
+- `pack_u16` / `pack_u8`: the float result becomes raw bytes again, written
+  straight into the destination frame.
+
+The plugin now uploads and downloads **bytes**, not floats: 16.6 MB per plane at
+4K instead of 33 MB, and when the plane's rows are packed (the usual case) the
+transfer goes straight from the VapourSynth frame to the GPU and back, with no
+host copy at all. The kernels use the same fp32 multiply, the same clamp order,
+and `floor()` before the cast, because a plain float-to-integer cast in OpenCL
+rounds to nearest while C truncates.
+
+| Measure (24 frames, 4K HDR10) | CPU conversion | GPU conversion |
+|---|---|---|
+| wall | 4.18 s | 3.50 s |
+| CPU time | 11.45 s | 10.70 s |
+| speed | 6.0 fps | 6.8 fps |
+| CPU seconds added by the filter | 3.3 s | 2.5 s |
+
+Measured against the state before any of this work: 4.51 s to 3.50 s wall,
+11.89 s to 10.70 s of CPU, 5.3 to 6.8 fps.
+
+Output is unchanged: the build before and after are **100 % identical** (max
+diff 0) for 8-bit, 10-bit, 16-bit, `bt=4`, `plane=4` (chroma) and `device=0`.
+The StaxRip R79 matrix still exits 0 on all nine cases, and the cycle test keeps
+GPU memory flat (2060, 2060, 2060 MiB after each cycle).
+
+An attempt to make the readback non-blocking and wait on an event instead of a
+blocking read made no difference (10.7 s either way), so the driver is not
+spinning on the CPU and that change was dropped.

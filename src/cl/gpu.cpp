@@ -79,6 +79,19 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
     return;
   }
 
+  // Pixel conversion kernels: only meaningful for integer samples, where the
+  // host can hand the plane over as the bytes VapourSynth already has.
+  rawPath_ = g_.sampleType != 1;
+  bps_ = g_.sampleType == 1 ? 4 : (g_.bits <= 8 ? 1 : 2);
+  if (rawPath_) {
+    kUnpack_ = ctx.api.createKernel(prog_, g_.bits <= 8 ? "unpack_u8" : "unpack_u16", &e);
+    kPack_ = ctx.api.createKernel(prog_, g_.bits <= 8 ? "pack_u8" : "pack_u16", &e);
+    if (!kUnpack_ || !kPack_) {
+      err_ = "clCreateKernel failed (pixel conversion)";
+      return;
+    }
+  }
+
   const int W = g_.width, H = g_.height, bw = p_.bw, bh = p_.bh;
   bufBx_ = mkTracked(CL_MEM_READ_ONLY, sizeof(int) * nb_, cpu.bx().data());
   bufBy_ = mkTracked(CL_MEM_READ_ONLY, sizeof(int) * nb_, cpu.by().data());
@@ -100,6 +113,8 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   bufBlocks_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * bw * bh, nullptr);
   bufOut_ = mkTracked(CL_MEM_WRITE_ONLY, sizeof(float) * W * H, nullptr);
   bufPlane_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * W * H, nullptr);
+  if (rawPath_)
+    bufRaw_ = mkTracked(CL_MEM_READ_WRITE, (size_t)bps_ * W * H, nullptr);
   if (p_.bm == 0) {
     bufKLast_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
     bufKCov_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * planeSize_, nullptr);
@@ -110,7 +125,8 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
     }
   }
   if (!bufBx_ || !bufBy_ || !bufWinAna_ || !bufWinA_ || !bufWinB_ || !bufPar_ || !bufGs_ ||
-      !bufPat_ || !bufShp_ || !bufFilt_ || !bufBlocks_ || !bufOut_ || !bufPlane_) {
+      !bufPat_ || !bufShp_ || !bufFilt_ || !bufBlocks_ || !bufOut_ || !bufPlane_ ||
+      (rawPath_ && !bufRaw_)) {
     err_ = "GPU alloc failed";
     return;
   }
@@ -194,12 +210,12 @@ GpuRef::~GpuRef() {
     ctx_->api.releaseMemObject(m);
   specPool_.clear();
   cl_mem all[] = {bufBx_, bufBy_, bufWinAna_, bufWinA_, bufWinB_, bufPar_, bufGs_, bufPat_,
-                  bufShp_, bufFilt_, bufBlocks_, bufOut_, bufPlane_, bufKLast_, bufKCov_,
+                  bufShp_, bufFilt_, bufBlocks_, bufOut_, bufPlane_, bufRaw_, bufKLast_, bufKCov_,
                   bufKPro_};
   for (cl_mem m : all)
     if (m)
       ctx_->api.releaseMemObject(m);
-  cl_kernel ks[] = {kFwd_, kFil_, kInv_, kSyn_, kKalInit_};
+  cl_kernel ks[] = {kFwd_, kFil_, kInv_, kSyn_, kKalInit_, kUnpack_, kPack_};
   for (cl_kernel k : ks)
     if (k)
       ctx_->api.releaseKernel(k);
@@ -237,6 +253,61 @@ void GpuRef::retireSpectra(cl_mem m) {
     ctx_->api.releaseMemObject(m);
 }
 
+bool GpuRef::launchFwd(cl_mem spec) {
+  ctx_->api.setKernelArg(kFwd_, 0, sizeof(cl_mem), &bufPlane_);
+  ctx_->api.setKernelArg(kFwd_, 3, sizeof(cl_mem), &spec);
+  size_t goff = 0, gsize = (size_t)nb_ * wgFft_, lsize = wgFft_;
+  cl_int e = ctx_->api.enqueueNDRange(ctx_->queue, kFwd_, 1, &goff, &gsize, &lsize, 0, nullptr,
+                                      nullptr);
+  if (e != CL_SUCCESS) {
+    err_ = "fft2d_fwd launch failed";
+    return false;
+  }
+  return true;
+}
+
+// Raw bytes -> float plane, producing exactly the values PlaneRef::upload makes.
+bool GpuRef::unpack() {
+  int n = g_.width * g_.height;
+  ctx_->api.setKernelArg(kUnpack_, 0, sizeof(cl_mem), &bufRaw_);
+  ctx_->api.setKernelArg(kUnpack_, 1, sizeof(cl_mem), &bufPlane_);
+  ctx_->api.setKernelArg(kUnpack_, 2, sizeof(int), &n);
+  if (g_.bits > 8) {
+    float norm = (float)(1u << (16 - g_.bits)) / 65535.0f;
+    ctx_->api.setKernelArg(kUnpack_, 3, sizeof(float), &norm);
+  }
+  size_t gsize = ((size_t)n + 63) / 64 * 64;
+  cl_int e = ctx_->api.enqueueNDRange(ctx_->queue, kUnpack_, 1, nullptr, &gsize, nullptr, 0,
+                                      nullptr, nullptr);
+  if (e != CL_SUCCESS) {
+    err_ = "unpack launch failed";
+    return false;
+  }
+  return true;
+}
+
+// Float plane -> raw bytes, matching PlaneRef::download.
+bool GpuRef::pack() {
+  int n = g_.width * g_.height;
+  ctx_->api.setKernelArg(kPack_, 0, sizeof(cl_mem), &bufOut_);
+  ctx_->api.setKernelArg(kPack_, 1, sizeof(cl_mem), &bufRaw_);
+  ctx_->api.setKernelArg(kPack_, 2, sizeof(int), &n);
+  if (g_.bits > 8) {
+    float invNorm = 1.0f / (float)(1u << (16 - g_.bits));
+    float maxPix = (float)((1u << g_.bits) - 1);
+    ctx_->api.setKernelArg(kPack_, 3, sizeof(float), &invNorm);
+    ctx_->api.setKernelArg(kPack_, 4, sizeof(float), &maxPix);
+  }
+  size_t gsize = ((size_t)n + 63) / 64 * 64;
+  cl_int e = ctx_->api.enqueueNDRange(ctx_->queue, kPack_, 1, nullptr, &gsize, nullptr, 0, nullptr,
+                                      nullptr);
+  if (e != CL_SUCCESS) {
+    err_ = "pack launch failed";
+    return false;
+  }
+  return true;
+}
+
 bool GpuRef::forward(int fn, const std::vector<float>& plane) {
   if (!ok_)
     return false;
@@ -252,15 +323,26 @@ bool GpuRef::forward(int fn, const std::vector<float>& plane) {
     err_ = "enqueueWriteBuffer failed";
     return false;
   }
-  ctx_->api.setKernelArg(kFwd_, 0, sizeof(cl_mem), &bufPlane_);
-  ctx_->api.setKernelArg(kFwd_, 3, sizeof(cl_mem), &spec);
-  size_t goff = 0, gsize = (size_t)nb_ * wgFft_, lsize = wgFft_;
-  e = ctx_->api.enqueueNDRange(ctx_->queue, kFwd_, 1, &goff, &gsize, &lsize, 0, nullptr, nullptr);
-  if (e != CL_SUCCESS) {
-    err_ = "fft2d_fwd launch failed";
+  return launchFwd(spec);
+}
+
+bool GpuRef::forwardRaw(int fn, const void* raw, size_t bytes) {
+  if (!ok_ || !rawPath_)
+    return false;
+  cl_mem spec = spectra(fn);
+  if (!spec) {
+    err_ = "GPU spectra alloc failed";
     return false;
   }
-  return true;
+  cl_int e = ctx_->api.enqueueWriteBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, (void*)raw, 0,
+                                          nullptr, nullptr);
+  if (e != CL_SUCCESS) {
+    err_ = "enqueueWriteBuffer failed";
+    return false;
+  }
+  if (!unpack())
+    return false;
+  return launchFwd(spec);
 }
 
 bool GpuRef::uploadDegridSample(const PlaneRef& cpu) {
@@ -278,9 +360,7 @@ bool GpuRef::uploadDegridSample(const PlaneRef& cpu) {
   return e == CL_SUCCESS;
 }
 
-bool GpuRef::process(const std::vector<int>& window, std::vector<float>& out) {
-  if (!ok_)
-    return false;
+bool GpuRef::runKernels(const std::vector<int>& window) {
   cl_mem s0 = spectra(window[0]);
   cl_mem s1 = window.size() > 1 ? spectra(window[1]) : s0;
   cl_mem s2 = window.size() > 2 ? spectra(window[2]) : s0;
@@ -332,9 +412,34 @@ bool GpuRef::process(const std::vector<int>& window, std::vector<float>& out) {
     err_ = "synthesize launch failed";
     return false;
   }
+  return true;
+}
+
+bool GpuRef::process(const std::vector<int>& window, std::vector<float>& out) {
+  if (!ok_)
+    return false;
+  if (!runKernels(window))
+    return false;
   out.assign(g_.width * g_.height, 0.0f);
-  e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufOut_, CL_TRUE, 0, sizeof(float) * out.size(),
-                                  out.data(), 0, nullptr, nullptr);
+  cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufOut_, CL_TRUE, 0,
+                                         sizeof(float) * out.size(), out.data(), 0, nullptr,
+                                         nullptr);
+  if (e != CL_SUCCESS) {
+    err_ = "readback failed";
+    return false;
+  }
+  return true;
+}
+
+bool GpuRef::processRaw(const std::vector<int>& window, void* dst, size_t bytes) {
+  if (!ok_ || !rawPath_)
+    return false;
+  if (!runKernels(window))
+    return false;
+  if (!pack())
+    return false;
+  cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, dst, 0, nullptr,
+                                         nullptr);
   if (e != CL_SUCCESS) {
     err_ = "readback failed";
     return false;

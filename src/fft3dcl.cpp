@@ -53,6 +53,7 @@ struct FilterInstance {
   // a fresh 33 MiB allocation and zero-fill for every plane of every frame.
   std::vector<float> planeBuf; // host copy of a source plane
   std::vector<float> outBuf;   // host copy of a processed plane
+  std::vector<uint8_t> rawBuf; // only used when a plane's rows are not packed
 };
 
 const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instanceData,
@@ -305,6 +306,7 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
   for (size_t k = 0; k < inst->processedPlanes.size(); k++) {
     int p = inst->processedPlanes[k];
     PlaneRef& ref = *inst->refs[k];
+    const PlaneGeom& g = inst->geoms[k];
 
     // Degrid: gridsample pattern built once (white-frame FFT, no source frame).
     if (ip.degridOn && !inst->degridDone[k]) {
@@ -316,15 +318,34 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
 
     if (inst->useGpu) {
       GpuRef& gpu = *inst->gpus[k];
+      // Integer samples: pass the plane through as the bytes VapourSynth already
+      // has and let the GPU convert them to float (and the result back). That
+      // takes two passes over eight million pixels per frame off the CPU.
+      const bool raw = gpu.rawPath();
+      const size_t rowBytes = (size_t)g.width * gpu.bytesPerSample();
+      const size_t planeBytes = rowBytes * (size_t)g.height;
       auto ensure = [&](int fn) {
         fn = clampFrame(fn, vi.numFrames);
         if (gpu.has(fn))
           return fn;
         const VSFrame* fr = vsapi->getFrameFilter(fn, clip, frameCtx);
-        inst->planeBuf.clear();
-        ref.upload(vsapi->getReadPtr(fr, p), vsapi->getStride(fr, p), inst->planeBuf);
+        if (raw) {
+          const uint8_t* sp = static_cast<const uint8_t*>(vsapi->getReadPtr(fr, p));
+          ptrdiff_t ss = vsapi->getStride(fr, p);
+          if ((size_t)ss == rowBytes) {
+            gpu.forwardRaw(fn, sp, planeBytes); // straight from the frame
+          } else {
+            inst->rawBuf.resize(planeBytes);
+            for (int y = 0; y < g.height; y++)
+              memcpy(inst->rawBuf.data() + (size_t)y * rowBytes, sp + (ptrdiff_t)y * ss, rowBytes);
+            gpu.forwardRaw(fn, inst->rawBuf.data(), planeBytes);
+          }
+        } else {
+          inst->planeBuf.clear();
+          ref.upload(vsapi->getReadPtr(fr, p), vsapi->getStride(fr, p), inst->planeBuf);
+          gpu.forward(fn, inst->planeBuf);
+        }
         vsapi->freeFrame(fr);
-        gpu.forward(fn, inst->planeBuf);
         return fn;
       };
       std::vector<int> window;
@@ -334,8 +355,25 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
       } else {
         window.push_back(ensure(n));
       }
-      inst->outBuf.clear();
-      if (!gpu.process(window, inst->outBuf)) {
+      bool done = false;
+      if (raw) {
+        uint8_t* dp = static_cast<uint8_t*>(vsapi->getWritePtr(dst, p));
+        ptrdiff_t ds = vsapi->getStride(dst, p);
+        if ((size_t)ds == rowBytes) {
+          done = gpu.processRaw(window, dp, planeBytes); // straight into the frame
+        } else {
+          inst->rawBuf.resize(planeBytes);
+          done = gpu.processRaw(window, inst->rawBuf.data(), planeBytes);
+          for (int y = 0; done && y < g.height; y++)
+            memcpy(dp + (ptrdiff_t)y * ds, inst->rawBuf.data() + (size_t)y * rowBytes, rowBytes);
+        }
+      } else {
+        inst->outBuf.clear();
+        done = gpu.process(window, inst->outBuf);
+        if (done)
+          ref.download(inst->outBuf, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
+      }
+      if (!done) {
         // Driver/OOM failure: disable GPU and fall through to the CPU path.
         inst->useGpu = false;
         if (!inst->gpuWarned) {
@@ -346,8 +384,6 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
           vsapi->logMessage(mtWarning, msg, core);
         }
       } else {
-        ref.download(inst->outBuf, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
-
         if (ip.bm >= 2) {
           // Keep only what the next requests can reuse: the current window plus
           // one frame of slack. 3*bt+1 entries cost 1.4 GiB of device memory at
