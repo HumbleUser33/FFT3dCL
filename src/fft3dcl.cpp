@@ -497,6 +497,6 @@ static const char* const fft3dclArgs =
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin* plugin, const VSPLUGINAPI* vspapi) {
   vspapi->configPlugin("com.github.humbleuser33.fft3dcl", "fft3dcl", "FFT3DCL denoiser (VS port)",
-                       VS_MAKE_VERSION(0, 8), VAPOURSYNTH_API_VERSION, 0, plugin);
+                       VS_MAKE_VERSION(1, 1), VAPOURSYNTH_API_VERSION, 0, plugin);
   vspapi->registerFunction("FFT3DCL", fft3dclArgs, "clip:vnode;", fft3dclCreate, nullptr, plugin);
 }

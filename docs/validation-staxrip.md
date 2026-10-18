@@ -285,12 +285,14 @@ That took 24 frames from 4.51 s to 4.18 s wall and 11.89 s to 11.45 s of CPU.
 
 The remaining CPU cost was the conversion itself: every frame was read as 16-bit
 and turned into float on the CPU (8.3 million multiplies), and the result was
-turned back into 16-bit on the CPU. Three small kernels replace both passes:
+turned back into 16-bit on the CPU. The conversion moved to the GPU, first as
+three small kernels and then, in the current build, inside the two kernels that
+already touch the data:
 
-- `unpack_u8` / `unpack_u16`: the raw bytes of the source plane become the float
-  plane the forward FFT reads.
-- `pack_u16` / `pack_u8`: the float result becomes raw bytes again, written
-  straight into the destination frame.
+- `fft2d_fwd` reads the source bytes directly (`-DRAW=8|16|0` picks `uchar`,
+  `ushort` or `float`) and converts them when it loads the block.
+- `synthesize` writes the result straight back as bytes, with the same clamp and
+  the same `floor(v * 65535 + 0.5)` rounding.
 
 The plugin now uploads and downloads **bytes**, not floats: 16.6 MB per plane at
 4K instead of 33 MB, and when the plane's rows are packed (the usual case) the
@@ -315,5 +317,89 @@ The StaxRip R79 matrix still exits 0 on all nine cases, and the cycle test keeps
 GPU memory flat (2060, 2060, 2060 MiB after each cycle).
 
 An attempt to make the readback non-blocking and wait on an event instead of a
-blocking read made no difference (10.7 s either way), so the driver is not
-spinning on the CPU and that change was dropped.
+blocking read made no difference at that time (10.7 s either way). It was
+retried later, after the kernels had been made three times faster, and it does
+help — see the next section. What did not help is a non-blocking *upload*: the
+driver copies the plane inside the call, so the wait was never the cost.
+
+## FFT kernels three times faster, and the wait no longer burns a core
+
+`FFT3DCL_TIME=<file>` writes a table of accumulated time per stage when a filter
+instance is released; in the same mode the queue is drained after every kernel,
+which shows the device time of each kernel. 24 frames of the real 4K HDR10 clip,
+`sigma=3, bt=4, bw=32, bh=32, ow=16, oh=16, sharpen=0.4`, per frame:
+
+| Stage | v1.0.0 | now |
+|---|---|---|
+| forward FFT (including the unpack pass) | 43.6 ms | 8.7 ms |
+| temporal filter | 5.4 ms | 5.2 ms |
+| inverse FFT | 42.1 ms | 9.4 ms |
+| synthesis | 1.7 ms | 1.6 ms |
+| upload to device | 2.9 ms | 2.7 ms |
+| pack + readback | 3.5 ms | 3.0 ms |
+| copy of the untouched planes | 1.5 ms | 1.7 ms |
+| **GPU work per frame** | **92.8 ms** | **24.9 ms** |
+
+Two thirds of the time was inside the two FFT kernels. Four changes, each one
+measured on its own and each one bit-identical to the build before it:
+
+1. **Twiddle factors are computed once per work-group** instead of once per
+   butterfly. A 32x32 block used about 5 100 `cos`/`sin` calls per pass; now the
+   group fills a 31-entry table in local memory. The expression that produces
+   each value is character identical, so the values are the same bits.
+2. **One padded local column** (`LP = bw + 1`). The column transforms read the
+   block with a stride of `bw`, which put all 32 work-items of a warp on the same
+   pair of local-memory banks: a 32-way conflict on every access.
+3. **All rows of a block are transformed in one pass, then all columns**, so a
+   32x32 block needs 12 barriers instead of 384 and no work-item sits idle while
+   a stage runs.
+4. **The forward pass skips the `bw - fbw` mirror columns** it never stores, and
+   the work-group is `4 * max(bw, bh)` (capped by the number of butterflies),
+   worth about another 8 %.
+
+The wait was the second half of the cost: `clEnqueueReadBuffer` with `CL_TRUE`
+busy-waits on Windows, so the plugin kept a whole CPU core turning while the GPU
+worked, and the encoder needs that core. The readback is now queued without
+blocking and the thread sleeps on a kernel32 event that the OpenCL completion
+callback signals (`clFinish` remains as a fallback if the driver never calls
+back).
+
+24 frames of the same clip, three runs each, same machine and session:
+
+| Measure | v1.0.0 | now |
+|---|---|---|
+| wall | 3.28 s | 1.68 s |
+| speed | 7.3 fps | 14.3 fps |
+| process CPU time | 9.85 s | 8.51 s |
+| decode only, same clip | 7.48 s | 7.48 s |
+| CPU the filter adds | about 2.4 s (99 ms/frame) | about 1.0 s (43 ms/frame) |
+| device buffers per instance | 345 MiB | 281 MiB |
+| GPU memory peak, whole system | 3220 MiB | 2043 MiB |
+| process private memory peak | 3425 MiB | 2955 MiB |
+
+The "CPU the filter adds" line has a wide error bar: the decode-only baseline
+itself moves between 7.30 s and 7.95 s from run to run. The direct comparison of
+the two builds (9.85 s against 8.51 s) is the reliable number.
+
+Nothing moved by a single unit: `tools/ab_dll.ps1` renders the same graph with
+the v1.0.0 build and with the current build and compares every sample — 100 %
+identical, max diff 0, at 8, 10 and 16 bit, at 4K and at 1080p. The only
+exception found is `bw=64`, where 490 samples of 24.9 million differ by one
+LSB; the fidelity against the original plugin is unchanged there (93.54 %,
+max diff 2, measured with both builds). The matrix against FFT3dGPU 0.8.6 is
+unchanged: 97.14 % (default), 96.30 % (`plane=4`), 94.83 % (10 bit), 100 %
+(`bt=-1`).
+
+The cycle test with the current build, four create/render/destroy cycles in one
+process: GPU memory after each cycle 2041, 2041, 2041, 2041 MiB, working set
+892 MiB each time, and the plugin logs `0 GPU instance(s) alive, 0 MiB of device
+buffers` after every cycle.
+
+Tried and dropped:
+
+- Non-blocking upload: the driver copies the plane inside the call (2.66 ms
+  instead of 2.88 ms) while four 4K frames have to stay alive.
+- A work-group larger than `4 * max(bw, bh)`: no further gain.
+- Moving `getFrameFilter` outside the instance mutex: it measures 0.00 ms with
+  ffms2, because the decoder runs on its own threads, so there is nothing to
+  overlap.
