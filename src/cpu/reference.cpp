@@ -118,7 +118,8 @@ void PlaneRef::download(const std::vector<float>& src, uint8_t* dst, ptrdiff_t p
       for (int x = 0; x < W; x++) {
         float v = src[y * W + x];
         v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-        row[x] = (uint8_t)std::lround(v * 255.0f);
+        // Same result as lround (v is not negative here) but vectorizable.
+        row[x] = (uint8_t)(v * 255.0f + 0.5f);
       }
     }
   } else { // FIXED4_16: dst*INV_BITDEPTHNORM, min(dst,MAX), UNORM write
@@ -130,7 +131,7 @@ void PlaneRef::download(const std::vector<float>& src, uint8_t* dst, ptrdiff_t p
         float v = src[y * W + x] * invNorm;
         v = v < maxPix ? v : maxPix; // min(dst, MAX_PIXEL_VALUE)
         v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-        row[x] = (uint16_t)std::lround(v * 65535.0f);
+        row[x] = (uint16_t)(v * 65535.0f + 0.5f);
       }
     }
   }

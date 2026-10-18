@@ -1,5 +1,6 @@
 #include "gpu.h"
 #include "kernels.h"
+#include <atomic>
 #include <cstdio>
 
 namespace fft3dcl {
@@ -11,8 +12,24 @@ static cl_mem mkBuf(GpuContext& c, cl_uint flags, size_t sz, const void* host) {
   return e == CL_SUCCESS ? m : nullptr;
 }
 
+static std::atomic<int> g_live{0};
+static std::atomic<size_t> g_bytes{0};
+
+int GpuRef::liveInstances() { return g_live.load(); }
+size_t GpuRef::liveBytes() { return g_bytes.load(); }
+
+cl_mem GpuRef::mkTracked(cl_uint flags, size_t sz, const void* host) {
+  cl_mem m = mkBuf(*ctx_, flags, sz, host);
+  if (m) {
+    bytes_ += sz;
+    g_bytes += sz;
+  }
+  return m;
+}
+
 GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, const PlaneRef& cpu)
   : ctx_(&ctx), p_(p), g_(g) {
+  ++g_live;
   nb_ = cpu.nblocks();
   fbw_ = cpu.fbw();
   planeSize_ = fbw_ * p_.bh;
@@ -63,30 +80,30 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   }
 
   const int W = g_.width, H = g_.height, bw = p_.bw, bh = p_.bh;
-  bufBx_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(int) * nb_, cpu.bx().data());
-  bufBy_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(int) * nb_, cpu.by().data());
-  bufWinAna_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(float) * bw * bh, cpu.winAna().data());
-  bufWinA_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(float) * bw * bh, cpu.winSynA().data());
-  bufWinB_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(float) * bw * bh, cpu.winSynB().data());
+  bufBx_ = mkTracked(CL_MEM_READ_ONLY, sizeof(int) * nb_, cpu.bx().data());
+  bufBy_ = mkTracked(CL_MEM_READ_ONLY, sizeof(int) * nb_, cpu.by().data());
+  bufWinAna_ = mkTracked(CL_MEM_READ_ONLY, sizeof(float) * bw * bh, cpu.winAna().data());
+  bufWinA_ = mkTracked(CL_MEM_READ_ONLY, sizeof(float) * bw * bh, cpu.winSynA().data());
+  bufWinB_ = mkTracked(CL_MEM_READ_ONLY, sizeof(float) * bw * bh, cpu.winSynB().data());
   std::vector<unsigned char> par(nb_);
   for (int i = 0; i < nb_; i++)
     par[i] = cpu.par()[i];
-  bufPar_ = mkBuf(ctx, CL_MEM_READ_ONLY, nb_, par.data());
-  bufGs_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(float) * 2 * planeSize_, nullptr);
+  bufPar_ = mkTracked(CL_MEM_READ_ONLY, nb_, par.data());
+  bufGs_ = mkTracked(CL_MEM_READ_ONLY, sizeof(float) * 2 * planeSize_, nullptr);
   std::vector<float> pat = cpu.pattern();
   if (pat.empty()) pat.assign(planeSize_, 0.0f);
-  bufPat_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(float) * pat.size(), pat.data());
+  bufPat_ = mkTracked(CL_MEM_READ_ONLY, sizeof(float) * pat.size(), pat.data());
   std::vector<float> shp = cpu.sharpenLut();
   if (shp.empty()) shp.assign(planeSize_, 0.0f);
-  bufShp_ = mkBuf(ctx, CL_MEM_READ_ONLY, sizeof(float) * shp.size(), shp.data());
-  bufFilt_ = mkBuf(ctx, CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
-  bufBlocks_ = mkBuf(ctx, CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * bw * bh, nullptr);
-  bufOut_ = mkBuf(ctx, CL_MEM_WRITE_ONLY, sizeof(float) * W * H, nullptr);
-  bufPlane_ = mkBuf(ctx, CL_MEM_READ_WRITE, sizeof(float) * W * H, nullptr);
+  bufShp_ = mkTracked(CL_MEM_READ_ONLY, sizeof(float) * shp.size(), shp.data());
+  bufFilt_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
+  bufBlocks_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * bw * bh, nullptr);
+  bufOut_ = mkTracked(CL_MEM_WRITE_ONLY, sizeof(float) * W * H, nullptr);
+  bufPlane_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * W * H, nullptr);
   if (p_.bm == 0) {
-    bufKLast_ = mkBuf(ctx, CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
-    bufKCov_ = mkBuf(ctx, CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * planeSize_, nullptr);
-    bufKPro_ = mkBuf(ctx, CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * planeSize_, nullptr);
+    bufKLast_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
+    bufKCov_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * planeSize_, nullptr);
+    bufKPro_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * planeSize_, nullptr);
     if (!bufKLast_ || !bufKCov_ || !bufKPro_) {
       err_ = "GPU alloc failed (kalman state)";
       return;
@@ -168,6 +185,8 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
 GpuRef::~GpuRef() {
   if (!ctx_)
     return;
+  --g_live;
+  g_bytes -= bytes_;
   for (auto& kv : specCache_)
     ctx_->api.releaseMemObject(kv.second);
   specCache_.clear();
@@ -199,7 +218,7 @@ cl_mem GpuRef::spectra(int fn) {
     m = specPool_.back();
     specPool_.pop_back();
   } else {
-    m = mkBuf(*ctx_, CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
+    m = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
   }
   if (m)
     specCache_[fn] = m;
@@ -207,8 +226,12 @@ cl_mem GpuRef::spectra(int fn) {
 }
 
 // A spectra buffer that left the cache: keep a few for reuse, release the rest.
+// The budget, not the count, is what matters: at 4K one buffer is 142 MiB, so
+// four of them would hold 566 MiB of device memory for nothing.
 void GpuRef::retireSpectra(cl_mem m) {
-  if (specPool_.size() < 4)
+  const size_t budget = 256u << 20; // 256 MiB of recycled buffers is enough
+  const size_t one = sizeof(float) * 2 * (size_t)nb_ * planeSize_;
+  if (specPool_.size() * one + one <= budget)
     specPool_.push_back(m);
   else
     ctx_->api.releaseMemObject(m);

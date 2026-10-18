@@ -22,6 +22,11 @@ public:
   bool ok() const { return ok_; }
   const std::string& error() const { return err_; }
 
+  // Process-wide totals, so a log can tell a real leak (instances still alive)
+  // from the driver keeping freed memory (no instance alive, memory still used).
+  static int liveInstances();
+  static size_t liveBytes();
+
   // Forward FFT of an uploaded float plane; result cached under frame key fn.
   bool forward(int fn, const std::vector<float>& plane);
   bool has(int fn) const { return specCache_.count(fn) != 0; }
@@ -39,6 +44,7 @@ public:
 private:
   cl_mem spectra(int fn); // create-or-get device buffer for frame fn
   void retireSpectra(cl_mem m); // put a cache buffer back in the reuse pool
+  cl_mem mkTracked(cl_uint flags, size_t sz, const void* host); // mkBuf + byte count
 
   GpuContext* ctx_;
   InternalParams p_;
@@ -56,9 +62,10 @@ private:
          bufPlane_ = nullptr, bufKLast_ = nullptr, bufKCov_ = nullptr, bufKPro_ = nullptr;
 
   std::map<int, cl_mem> specCache_;
-  // Retired spectra buffers. Reusing them avoids a create/release round-trip per
-  // frame, which the driver answers by keeping the memory (visible as slowly
-  // growing GPU memory across previews).
+  size_t bytes_ = 0; // device bytes held by this instance
+  // Retired spectra buffers. Reusing them avoids a create/release round-trip
+  // per frame, which the driver answers by keeping the memory (visible as
+  // slowly growing GPU memory across previews).
   std::vector<cl_mem> specPool_;
   bool kalmanFirst_ = true;
   int nb_, fbw_, planeSize_;

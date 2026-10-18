@@ -12,6 +12,8 @@
 #include "cl/gpu.h"
 
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -47,12 +49,38 @@ struct FilterInstance {
   std::vector<bool> degridDone;
   std::mutex mtx; // guards cache, refs scratch, degrid init
   bool gpuWarned = false; // one core-log warning if the GPU path gives up
+  // Reused staging buffers (33 MiB each at 4K): allocating them per frame meant
+  // a fresh 33 MiB allocation and zero-fill for every plane of every frame.
+  std::vector<float> planeBuf; // host copy of a source plane
+  std::vector<float> outBuf;   // host copy of a processed plane
 };
 
 const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instanceData,
                                       void** frameData, VSFrameContext* frameCtx, VSCore* core,
                                       const VSAPI* vsapi);
 void VS_CC fft3dclFree(void* instanceData, VSCore* core, const VSAPI* vsapi);
+
+// One line per filter instance so a log can separate a real leak (instances
+// piling up) from the driver holding on to memory that was released correctly.
+void logGpuUsage(VSCore* core, const VSAPI* vsapi, const char* what) {
+  char msg[160];
+  snprintf(msg, sizeof(msg), "FFT3DCL: %s - %d GPU instance(s) alive, %.0f MiB of device buffers",
+           what, GpuRef::liveInstances(), (double)GpuRef::liveBytes() / 1048576.0);
+  vsapi->logMessage(mtInformation, msg, core);
+  // Some hosts swallow the VapourSynth log. Setting FFT3DCL_LOG to a file path
+  // writes the same line there, which is how the memory behaviour in StaxRip was
+  // traced.
+  const char* trace = getenv("FFT3DCL_LOG");
+  if (trace && *trace) {
+    if (FILE* f = fopen(trace, "a")) {
+      char ts[16] = {};
+      time_t now = time(nullptr);
+      strftime(ts, sizeof(ts), "%H:%M:%S", localtime(&now));
+      fprintf(f, "%s %s\n", ts, msg);
+      fclose(f);
+    }
+  }
+}
 
 // ---- create ---------------------------------------------------------------
 
@@ -212,6 +240,7 @@ void VS_CC fft3dclCreate(const VSMap* in, VSMap* out, void* userData, VSCore* co
   vsapi->createVideoFilter(out, "FFT3DCL", srcvi, fft3dclGetFrame, fft3dclFree, fm,
                            deps, 1, raw, core);
   nodeGuard.owned = false; // the graph now owns the dependency reference
+  logGpuUsage(core, vsapi, "created");
 }
 
 // ---- getframe -------------------------------------------------------------
@@ -292,10 +321,10 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
         if (gpu.has(fn))
           return fn;
         const VSFrame* fr = vsapi->getFrameFilter(fn, clip, frameCtx);
-        std::vector<float> plane;
-        ref.upload(vsapi->getReadPtr(fr, p), vsapi->getStride(fr, p), plane);
+        inst->planeBuf.clear();
+        ref.upload(vsapi->getReadPtr(fr, p), vsapi->getStride(fr, p), inst->planeBuf);
         vsapi->freeFrame(fr);
-        gpu.forward(fn, plane);
+        gpu.forward(fn, inst->planeBuf);
         return fn;
       };
       std::vector<int> window;
@@ -305,8 +334,8 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
       } else {
         window.push_back(ensure(n));
       }
-      std::vector<float> outPlane;
-      if (!gpu.process(window, outPlane)) {
+      inst->outBuf.clear();
+      if (!gpu.process(window, inst->outBuf)) {
         // Driver/OOM failure: disable GPU and fall through to the CPU path.
         inst->useGpu = false;
         if (!inst->gpuWarned) {
@@ -317,7 +346,7 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
           vsapi->logMessage(mtWarning, msg, core);
         }
       } else {
-        ref.download(outPlane, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
+        ref.download(inst->outBuf, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
 
         if (ip.bm >= 2) {
           // Keep only what the next requests can reuse: the current window plus
@@ -339,10 +368,10 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
       if (it != cache.end())
         return it->second;
       const VSFrame* fr = vsapi->getFrameFilter(fn, clip, frameCtx);
-      std::vector<float> plane;
-      ref.upload(vsapi->getReadPtr(fr, p), vsapi->getStride(fr, p), plane);
+      inst->planeBuf.clear();
+      ref.upload(vsapi->getReadPtr(fr, p), vsapi->getStride(fr, p), inst->planeBuf);
       vsapi->freeFrame(fr);
-      auto s = ref.computeSpectra(plane);
+      auto s = ref.computeSpectra(inst->planeBuf);
       cache[fn] = s;
       return s;
     };
@@ -355,9 +384,9 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
       window.push_back(getSpectra(n));
     }
 
-    std::vector<float> outPlane;
-    ref.filterAndSynthesize(window, outPlane);
-    ref.download(outPlane, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
+    inst->outBuf.clear();
+    ref.filterAndSynthesize(window, inst->outBuf);
+    ref.download(inst->outBuf, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
 
     // Prune the spectra cache around the current request (same window as GPU).
     if (ip.bm >= 2) {
@@ -377,6 +406,7 @@ void VS_CC fft3dclFree(void* instanceData, VSCore* core, const VSAPI* vsapi) {
   FilterInstance* inst = static_cast<FilterInstance*>(instanceData);
   vsapi->freeNode(inst->clip); // we own the dependency reference: give it back
   delete inst;
+  logGpuUsage(core, vsapi, "released");
 }
 
 } // namespace
