@@ -351,6 +351,9 @@ bool GpuRef::forwardRaw(int fn, const void* raw, size_t bytes) {
   cl_int e;
   {
     StageTime t(kUpload);
+    // Blocking on purpose: the driver copies the plane here, so the caller does
+    // not have to keep the source frame alive, and a non-blocking queue only
+    // saved 0.2 ms in measurement while holding four 4K frames in RAM.
     e = ctx_->api.enqueueWriteBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, (void*)raw, 0,
                                      nullptr, nullptr);
   }
