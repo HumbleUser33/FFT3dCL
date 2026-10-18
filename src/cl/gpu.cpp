@@ -171,6 +171,9 @@ GpuRef::~GpuRef() {
   for (auto& kv : specCache_)
     ctx_->api.releaseMemObject(kv.second);
   specCache_.clear();
+  for (cl_mem m : specPool_)
+    ctx_->api.releaseMemObject(m);
+  specPool_.clear();
   cl_mem all[] = {bufBx_, bufBy_, bufWinAna_, bufWinA_, bufWinB_, bufPar_, bufGs_, bufPat_,
                   bufShp_, bufFilt_, bufBlocks_, bufOut_, bufPlane_, bufKLast_, bufKCov_,
                   bufKPro_};
@@ -189,10 +192,26 @@ cl_mem GpuRef::spectra(int fn) {
   auto it = specCache_.find(fn);
   if (it != specCache_.end())
     return it->second;
-  cl_mem m = mkBuf(*ctx_, CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
+  // Reuse a retired buffer when possible: creating and releasing one per frame
+  // makes the driver hold on to the memory.
+  cl_mem m = nullptr;
+  if (!specPool_.empty()) {
+    m = specPool_.back();
+    specPool_.pop_back();
+  } else {
+    m = mkBuf(*ctx_, CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
+  }
   if (m)
     specCache_[fn] = m;
   return m;
+}
+
+// A spectra buffer that left the cache: keep a few for reuse, release the rest.
+void GpuRef::retireSpectra(cl_mem m) {
+  if (specPool_.size() < 4)
+    specPool_.push_back(m);
+  else
+    ctx_->api.releaseMemObject(m);
 }
 
 bool GpuRef::forward(int fn, const std::vector<float>& plane) {
@@ -306,7 +325,7 @@ void GpuRef::pruneCache(int lo, int hi) {
     if (keep) {
       ++it;
     } else {
-      ctx_->api.releaseMemObject(it->second);
+      retireSpectra(it->second);
       it = specCache_.erase(it);
     }
   }

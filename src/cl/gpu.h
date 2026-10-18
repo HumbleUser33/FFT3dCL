@@ -38,6 +38,7 @@ public:
 
 private:
   cl_mem spectra(int fn); // create-or-get device buffer for frame fn
+  void retireSpectra(cl_mem m); // put a cache buffer back in the reuse pool
 
   GpuContext* ctx_;
   InternalParams p_;
@@ -55,6 +56,10 @@ private:
          bufPlane_ = nullptr, bufKLast_ = nullptr, bufKCov_ = nullptr, bufKPro_ = nullptr;
 
   std::map<int, cl_mem> specCache_;
+  // Retired spectra buffers. Reusing them avoids a create/release round-trip per
+  // frame, which the driver answers by keeping the memory (visible as slowly
+  // growing GPU memory across previews).
+  std::vector<cl_mem> specPool_;
   bool kalmanFirst_ = true;
   int nb_, fbw_, planeSize_;
   size_t wgFft_ = 0;

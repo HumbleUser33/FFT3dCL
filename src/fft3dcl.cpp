@@ -320,7 +320,10 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
         ref.download(outPlane, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
 
         if (ip.bm >= 2) {
-          int lo = n - ip.current - ip.bt, hi = n - ip.current + 2 * ip.bt;
+          // Keep only what the next requests can reuse: the current window plus
+          // one frame of slack. 3*bt+1 entries cost 1.4 GiB of device memory at
+          // 4K with bt=3; bt+2 entries cover sequential access just as well.
+          int lo = n - ip.current - 1, hi = n - ip.current + ip.bt;
           gpu.pruneCache(lo, hi);
         } else if (ip.bm != 0) {
           gpu.pruneCache(-1, -2); // clear all
@@ -356,9 +359,9 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
     ref.filterAndSynthesize(window, outPlane);
     ref.download(outPlane, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
 
-    // Prune the spectra cache around the current request.
+    // Prune the spectra cache around the current request (same window as GPU).
     if (ip.bm >= 2) {
-      int lo = n - ip.current - ip.bt, hi = n - ip.current + 2 * ip.bt;
+      int lo = n - ip.current - 1, hi = n - ip.current + ip.bt;
       for (auto it = cache.begin(); it != cache.end();)
         it = (it->first < lo || it->first > hi) ? cache.erase(it) : std::next(it);
     } else if (ip.bm != 0 && !cache.empty()) {

@@ -148,6 +148,52 @@ sharpen=0.4`, `bt=0`, `plane=4` and `mode=0`. The StaxRip R79 matrix (`bt=-1`,
 `device=1`, `device=0`, `plane=4`) still exits 0, and the shutdown warning is
 gone.
 
+## Per-instance footprint (reduced)
+
+### Report
+
+With the leak gone, one 4K instance still touched a lot of memory while it was
+alive, and GPU memory crept slowly from one preview to the next: about 1 GB of
+device memory and 1.8 GB of working set on 3840x2160.
+
+### Changes
+
+1. **CPU scratch is allocated on demand.** `filtRe_`, `filtIm_`, `corrRe_` and
+   `corrIm_` belong to the CPU path (`filterAndSynthesize`) but were sized in the
+   constructor, so the OpenCL path paid 4 x 71 MiB at 4K for nothing. They are
+   now sized on first use.
+2. **Spectra buffers are recycled.** `pruneCache` used to call
+   `clReleaseMemObject` on a spectra buffer and `spectra` a fresh
+   `clCreateBuffer` for the next frame; the driver answers that pattern by
+   keeping the freed memory. Retired buffers now go to a small reuse pool (up to
+   4) that `spectra` draws from, and the pool is released with the instance.
+3. **The spectra cache window is `bt+2` frames instead of `3*bt+1`.** With
+   `bt=3` that is 5 cached frames instead of 10, i.e. 710 MiB instead of 1420 MiB
+   of device memory at 4K. The old window only helped requests far outside the
+   current temporal window; sequential and prefetched access hit the new one
+   just as well.
+
+### Verification
+
+4K clip, `bt=3`, four create/render/destroy cycles (VapourSynth R81 +
+BestSource, `device=2`):
+
+| Measure | Before | After |
+|---|---|---|
+| peak working set while rendering | 2767-2812 MiB | 1865 MiB |
+| peak private committed while rendering | 3510-3619 MiB | 3001-3100 MiB |
+| working set retained per cycle | +0 MiB | +0 MiB |
+| private committed retained per cycle | +0.5 MiB | +0 to +14 MiB (noise) |
+| peak private committed, `device=0` | ~3000 MiB | 2441 MiB |
+
+Speed is unchanged: 16 frames at 4K render in 5.50 s before and 5.49 s after
+with one request at a time, 5.36 s and 5.44 s with four parallel requests.
+
+Pixels are unchanged: the build before these changes and the build after render
+**100 % identical** output (max diff 0) for the default parameters, `bt=4`,
+`bt=1`, `device=0`, 8-bit and 10-bit clips, and 1920x1080 10-bit with `bt=4`.
+The StaxRip R79 matrix still exits 0 on all nine cases.
+
 ### Remaining footprint (not a leak)
 
 A single 4K instance still peaks near 2.1 GB of private memory: roughly 410 MB

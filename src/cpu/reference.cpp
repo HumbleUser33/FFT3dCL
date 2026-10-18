@@ -60,13 +60,12 @@ PlaneRef::PlaneRef(const InternalParams& p, const PlaneGeom& g)
   pattern_ = buildPattern(bw, bh, p.bt, p.sigma * 255.0f, p.sigma2, p.sigma3, p.sigma4, p.usePattern);
   sharpen_ = buildSharpenLUT(bw, bh, p.sharpen, p.svr, p.scutoff);
 
-  const int n = nblocks() * fbw_ * p_.bh;
+  // Used by computeSpectra, which runs on both backends.
   blockReal_.resize(bw * bh);
   fullSpec_.resize(bw * bh);
-  filtRe_.resize(n);
-  filtIm_.resize(n);
-  corrRe_.resize(n);
-  corrIm_.resize(n);
+  // filtRe_/filtIm_/corrRe_/corrIm_ belong to the CPU path only
+  // (filterAndSynthesize). Resizing them here used to cost 4 x nblocks x fbw x bh
+  // floats even when the OpenCL backend did all the work (284 MiB at 4K).
 
   // CHROMANORM: 128/255 at 8 bit, 32768/65535 at 10-16 bit, 0 for float
   // (fft3dgpu.hlsl:21-33). Mode 1 YUV chroma only (FFT3dGPU.cpp:462).
@@ -214,6 +213,15 @@ void PlaneRef::filterAndSynthesize(const std::vector<std::shared_ptr<Spectra>>& 
   const int W = g_.width, H = g_.height;
   const int planeSize = fbw * bh;
   out.assign(W * H, 0.0f);
+
+  // CPU-only scratch, sized on first use (see the constructor comment).
+  const size_t total = (size_t)nb * planeSize;
+  if (filtRe_.size() < total) {
+    filtRe_.resize(total);
+    filtIm_.resize(total);
+    corrRe_.resize(total);
+    corrIm_.resize(total);
+  }
 
   const Spectra& cur = *window[p_.bm >= 2 ? p_.current : 0];
 
