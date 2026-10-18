@@ -165,8 +165,9 @@ device memory and 1.8 GB of working set on 3840x2160.
 2. **Spectra buffers are recycled.** `pruneCache` used to call
    `clReleaseMemObject` on a spectra buffer and `spectra` a fresh
    `clCreateBuffer` for the next frame; the driver answers that pattern by
-   keeping the freed memory. Retired buffers now go to a small reuse pool (up to
-   4) that `spectra` draws from, and the pool is released with the instance.
+   keeping the freed memory. Retired buffers now go to a small reuse pool (256
+   MiB worth) that `spectra` draws from, and the pool is released with the
+   instance.
 3. **The spectra cache window is `bt+2` frames instead of `3*bt+1`.** With
    `bt=3` that is 5 cached frames instead of 10, i.e. 710 MiB instead of 1420 MiB
    of device memory at 4K. The old window only helped requests far outside the
@@ -196,7 +197,90 @@ The StaxRip R79 matrix still exits 0 on all nine cases.
 
 ### Remaining footprint (not a leak)
 
-A single 4K instance still peaks near 2.1 GB of private memory: roughly 410 MB
-of CPU scratch that the `PlaneRef` object allocates even when the OpenCL path
-is used, plus the OpenCL buffers and VapourSynth's frame cache. That memory is
-now released properly; shrinking it is a separate optimisation.
+A single 4K instance still peaks near 2.1 GB of private memory: the OpenCL
+buffers, the host staging buffers and VapourSynth's frame cache. That memory is
+released properly; shrinking it further means moving the pixel conversion to
+the GPU (see the CPU audit below).
+
+## Driving the real StaxRip preview (test method)
+
+The measurements above use `vspipe`. To reproduce what the user sees, the real
+StaxRip window is driven by UI Automation:
+
+```powershell
+# open the preview (the Preview menu item is invoked directly, no click needed)
+& uia_do.ps1 -ProcessId <pid> -Name '^Preview$' -Action invoke
+# close it again
+SendMessageW(previewWindowHandle, WM_CLOSE, 0, 0)
+```
+
+Notes for whoever repeats this:
+
+- UI Automation only sees windows on the **current virtual desktop**. If StaxRip
+  is on another desktop, `FindAll` returns nothing and the tree looks empty.
+- StaxRip hosts VapourSynth **in its own process** (no `vspipe` child), so the
+  filter's memory shows up in the StaxRip process.
+- One preview creates and destroys the filter **three times** (source script,
+  view script, thumbnails), and the new instance is created *before* the old one
+  is destroyed.
+
+## GPU memory still climbs in StaxRip (not our buffers)
+
+Same project, three preview open/close cycles, sampled once per second
+(4K HDR10, `sigma=3, bt=4, bw=32, bh=32, ow=16, oh=16, sharpen=0.4`):
+
+| Cycle | GPU memory peak while open | GPU memory after close |
+|---|---|---|
+| 1 | 3373 MiB | 2303 MiB |
+| 2 | 3613 MiB | 2509 MiB |
+| 3 | 3818 MiB | 2715 MiB |
+
+About 200 MiB of GPU memory and 500 MiB of private memory stay behind per cycle,
+which matches what is seen in Task Manager. The filter now logs its own state,
+and that log says the memory is not ours:
+
+```
+08:00:41 FFT3DCL: created   - 1 GPU instance(s) alive, 329 MiB of device buffers
+08:00:41 FFT3DCL: released  - 0 GPU instance(s) alive, 0 MiB of device buffers
+```
+
+Every instance is destroyed and every `cl_mem` is released before the preview
+window closes. The same script, the same clip and the same parameters run in a
+plain `python.exe` (StaxRip's own VapourSynth, ffms2, no cache clearing) keep
+GPU memory flat: 3212, 3213, 3214 MiB after each cycle. So the growth comes from
+the driver holding on to memory it was asked to free (WDDM defers it) and from
+StaxRip's own preview cache, not from the plugin.
+
+A process-wide buffer pool was tried to stop the driver round-trips. It made
+things worse (peak 5.8 GB) because StaxRip creates the new graph before
+destroying the old one, so the pool is always empty when it would be useful, and
+it keeps 470 MiB alive in the meantime. It was reverted; the per-instance pool
+stays.
+
+## CPU used by the filter
+
+24 frames of the real 4K HDR10 clip through StaxRip's VapourSynth, R79:
+
+| Graph | Wall | CPU time | Cores busy | Speed |
+|---|---|---|---|---|
+| source only | 1.20 s | 7.86 s | 6.5 | 20.0 fps |
+| source + FFT3DCL (GPU) | 4.18 s | 11.45 s | 2.7 | 5.7 fps |
+| source + FFT3DCL (CPU path) | 52.30 s | 58.94 s | 1.1 | 0.5 fps |
+
+The GPU path adds about 3.6 s of CPU for 24 frames, roughly 150 ms per frame,
+and it also stops the decoder from using all cores (6.5 down to 2.7) because one
+mutex covers the upload, the kernels and the download.
+
+Two fixes landed:
+
+1. `download()` used `std::lround` per pixel, a library call that cannot be
+   vectorized. Replacing it with `(uint16_t)(v * 65535.0f + 0.5f)` on a value
+   already clamped to `[0,1]` gives the same numbers and lets MSVC use SSE.
+2. The 33 MiB staging vectors were allocated and zero-filled for every plane of
+   every frame; they are now reused.
+
+That took 24 frames from 4.51 s to 4.18 s wall and 11.89 s to 11.45 s of CPU.
+The next step is the same conversion moved to the GPU: upload the plane as raw
+16-bit and let a kernel expand it to float, and write the result back as 16-bit
+on the device, which would remove most of the 150 ms per frame and let the
+upload and download happen outside the mutex.

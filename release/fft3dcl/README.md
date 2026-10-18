@@ -91,6 +91,13 @@ Engine selection — **with no effect whatsoever on the denoising**:
   AMD/Intel compatibility rests on those rules.
 - **Known limitation**: non-standard overlap (`ow`/`oh` ≠ half the block) is
   approximate; the default setting (half-block overlap) is exact.
+- **Memory**: one 4K instance holds about 1.1 GB of GPU memory and 1 GB of RAM
+  while it is alive, and releases all of it when the clip is destroyed. If you
+  suspect memory is not coming back, set the environment variable `FFT3DCL_LOG`
+  to a file path: the plugin then writes one line per instance created and
+  destroyed, with the number of live instances and the device memory they hold.
+  If that counter returns to 0 while GPU memory stays high, the memory is held
+  by the driver or by the host application, not by this filter.
 
 ## 4. Intentional differences vs the original
 1. `bt=-1` performs the real FFT round-trip (the original output black).
