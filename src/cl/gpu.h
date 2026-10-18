@@ -54,9 +54,7 @@ private:
   cl_mem spectra(int fn); // create-or-get device buffer for frame fn
   void retireSpectra(cl_mem m); // put a cache buffer back in the reuse pool
   cl_mem mkTracked(cl_uint flags, size_t sz, const void* host); // mkBuf + byte count
-  bool launchFwd(cl_mem spec);  // fft2d_fwd: bufPlane_ -> spec
-  bool unpack();                // raw bytes -> bufPlane_ as float
-  bool pack();                  // bufOut_ float -> raw bytes
+  bool launchFwd(cl_mem spec);  // fft2d_fwd: bufPlane_ or bufRaw_ -> spec
   bool runKernels(const std::vector<int>& window); // filter + inverse + synthesis
 
   GpuContext* ctx_;
@@ -67,7 +65,7 @@ private:
 
   cl_program prog_ = nullptr;
   cl_kernel kFwd_ = nullptr, kFil_ = nullptr, kInv_ = nullptr, kSyn_ = nullptr,
-            kKalInit_ = nullptr, kUnpack_ = nullptr, kPack_ = nullptr;
+            kKalInit_ = nullptr;
 
   cl_mem bufBx_ = nullptr, bufBy_ = nullptr, bufWinAna_ = nullptr, bufWinA_ = nullptr,
          bufWinB_ = nullptr, bufPar_ = nullptr, bufGs_ = nullptr, bufPat_ = nullptr,

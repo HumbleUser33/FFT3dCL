@@ -69,10 +69,11 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   }
   char opts[256];
   snprintf(opts, sizeof(opts),
-           "-DLSZ=%d -DLSW=%d -DLP=%d -DLSZP=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d "
+           "-DLSZ=%d -DLSW=%d -DLP=%d -DLSZP=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d -DRAW=%d "
            "-cl-fp32-correctly-rounded-divide-sqrt",
            p_.bw * p_.bh, p_.bw > p_.bh ? p_.bw : p_.bh, p_.bw + 1, (p_.bw + 1) * p_.bh, p_.bm,
-           p_.degridOn ? 1 : 0, p_.usePattern ? 1 : 0, p_.sharpenOn ? 1 : 0);
+           p_.degridOn ? 1 : 0, p_.usePattern ? 1 : 0, p_.sharpenOn ? 1 : 0,
+           g_.sampleType == 1 ? 0 : (g_.bits <= 8 ? 8 : 16));
   e = ctx.api.buildProgram(prog_, 1, &ctx.device, opts, nullptr, nullptr);
   if (e != CL_SUCCESS) {
     char log[4096] = {};
@@ -91,18 +92,10 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
     return;
   }
 
-  // Pixel conversion kernels: only meaningful for integer samples, where the
-  // host can hand the plane over as the bytes VapourSynth already has.
+  // Integer samples: the forward kernel reads the bytes VapourSynth gave us and
+  // the synthesis writes them back, so no conversion kernel is needed.
   rawPath_ = g_.sampleType != 1;
   bps_ = g_.sampleType == 1 ? 4 : (g_.bits <= 8 ? 1 : 2);
-  if (rawPath_) {
-    kUnpack_ = ctx.api.createKernel(prog_, g_.bits <= 8 ? "unpack_u8" : "unpack_u16", &e);
-    kPack_ = ctx.api.createKernel(prog_, g_.bits <= 8 ? "pack_u8" : "pack_u16", &e);
-    if (!kUnpack_ || !kPack_) {
-      err_ = "clCreateKernel failed (pixel conversion)";
-      return;
-    }
-  }
 
   const int W = g_.width, H = g_.height, bw = p_.bw, bh = p_.bh;
   bufBx_ = mkTracked(CL_MEM_READ_ONLY, sizeof(int) * nb_, cpu.bx().data());
@@ -123,10 +116,15 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   bufShp_ = mkTracked(CL_MEM_READ_ONLY, sizeof(float) * shp.size(), shp.data());
   bufFilt_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
   bufBlocks_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * bw * bh, nullptr);
-  bufOut_ = mkTracked(CL_MEM_WRITE_ONLY, sizeof(float) * W * H, nullptr);
-  bufPlane_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * W * H, nullptr);
-  if (rawPath_)
+  if (rawPath_) {
+    // With integer samples the bytes go straight in and out of the two kernels
+    // that already touch them, so the float plane and the float output buffer
+    // are not allocated at all: 66 MB of device memory saved per instance at 4K.
     bufRaw_ = mkTracked(CL_MEM_READ_WRITE, (size_t)bps_ * W * H, nullptr);
+  } else {
+    bufOut_ = mkTracked(CL_MEM_WRITE_ONLY, sizeof(float) * W * H, nullptr);
+    bufPlane_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * W * H, nullptr);
+  }
   if (p_.bm == 0) {
     bufKLast_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * 2 * (size_t)nb_ * planeSize_, nullptr);
     bufKCov_ = mkTracked(CL_MEM_READ_WRITE, sizeof(float) * (size_t)nb_ * planeSize_, nullptr);
@@ -137,8 +135,8 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
     }
   }
   if (!bufBx_ || !bufBy_ || !bufWinAna_ || !bufWinA_ || !bufWinB_ || !bufPar_ || !bufGs_ ||
-      !bufPat_ || !bufShp_ || !bufFilt_ || !bufBlocks_ || !bufOut_ || !bufPlane_ ||
-      (rawPath_ && !bufRaw_)) {
+      !bufPat_ || !bufShp_ || !bufFilt_ || !bufBlocks_ ||
+      (rawPath_ ? !bufRaw_ : (!bufOut_ || !bufPlane_))) {
     err_ = "GPU alloc failed";
     return;
   }
@@ -158,6 +156,12 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   ctx.api.setKernelArg(kFwd_, 9, sizeof(int), &ifbw);
   ctx.api.setKernelArg(kFwd_, 10, sizeof(int), &inb);
   ctx.api.setKernelArg(kFwd_, 11, sizeof(float), &cn);
+  // norm/invNorm/maxPix only matter for the integer formats; the values are the
+  // ones the old unpack_u16/pack_u16 kernels were given.
+  float norm = (rawPath_ && g_.bits > 8) ? (float)(1u << (16 - g_.bits)) / 65535.0f : 1.0f;
+  float invNorm = rawPath_ ? 1.0f / (float)(1u << (16 - g_.bits)) : 1.0f;
+  float maxPix = rawPath_ ? (float)((1u << g_.bits) - 1) : 0.0f;
+  ctx.api.setKernelArg(kFwd_, 12, sizeof(float), &norm);
 
   ctx.api.setKernelArg(kInv_, 1, sizeof(cl_mem), &bufBlocks_);
   ctx.api.setKernelArg(kInv_, 2, sizeof(cl_mem), &bufWinA_);
@@ -174,7 +178,7 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   int ystep = p_.mode == 0 ? bh : bh - p_.oh;
   int ncols = cpu.ncols(), nrows = cpu.nrows();
   ctx.api.setKernelArg(kSyn_, 0, sizeof(cl_mem), &bufBlocks_);
-  ctx.api.setKernelArg(kSyn_, 1, sizeof(cl_mem), &bufOut_);
+  // arg 1 (the output) is set per call: the float buffer or the raw bytes.
   ctx.api.setKernelArg(kSyn_, 2, sizeof(int), &iw);
   ctx.api.setKernelArg(kSyn_, 3, sizeof(int), &ih);
   ctx.api.setKernelArg(kSyn_, 4, sizeof(int), &ibw);
@@ -186,6 +190,8 @@ GpuRef::GpuRef(GpuContext& ctx, const InternalParams& p, const PlaneGeom& g, con
   ctx.api.setKernelArg(kSyn_, 10, sizeof(int), &ncols);
   ctx.api.setKernelArg(kSyn_, 11, sizeof(int), &nrows);
   ctx.api.setKernelArg(kSyn_, 12, sizeof(float), &cn);
+  ctx.api.setKernelArg(kSyn_, 13, sizeof(float), &invNorm);
+  ctx.api.setKernelArg(kSyn_, 14, sizeof(float), &maxPix);
 
   ctx.api.setKernelArg(kFil_, 4, sizeof(cl_mem), &bufFilt_);
   ctx.api.setKernelArg(kFil_, 5, sizeof(cl_mem), &bufGs_);
@@ -227,7 +233,7 @@ GpuRef::~GpuRef() {
   for (cl_mem m : all)
     if (m)
       ctx_->api.releaseMemObject(m);
-  cl_kernel ks[] = {kFwd_, kFil_, kInv_, kSyn_, kKalInit_, kUnpack_, kPack_};
+  cl_kernel ks[] = {kFwd_, kFil_, kInv_, kSyn_, kKalInit_};
   for (cl_kernel k : ks)
     if (k)
       ctx_->api.releaseKernel(k);
@@ -266,7 +272,7 @@ void GpuRef::retireSpectra(cl_mem m) {
 }
 
 bool GpuRef::launchFwd(cl_mem spec) {
-  ctx_->api.setKernelArg(kFwd_, 0, sizeof(cl_mem), &bufPlane_);
+  ctx_->api.setKernelArg(kFwd_, 0, sizeof(cl_mem), rawPath_ ? &bufRaw_ : &bufPlane_);
   ctx_->api.setKernelArg(kFwd_, 3, sizeof(cl_mem), &spec);
   size_t goff = 0, gsize = (size_t)nb_ * wgFft_, lsize = wgFft_;
   long long t0 = timeEnabled() ? nowNs() : 0;
@@ -278,48 +284,6 @@ bool GpuRef::launchFwd(cl_mem spec) {
   }
   if (e != CL_SUCCESS) {
     err_ = "fft2d_fwd launch failed";
-    return false;
-  }
-  return true;
-}
-
-// Raw bytes -> float plane, producing exactly the values PlaneRef::upload makes.
-bool GpuRef::unpack() {
-  int n = g_.width * g_.height;
-  ctx_->api.setKernelArg(kUnpack_, 0, sizeof(cl_mem), &bufRaw_);
-  ctx_->api.setKernelArg(kUnpack_, 1, sizeof(cl_mem), &bufPlane_);
-  ctx_->api.setKernelArg(kUnpack_, 2, sizeof(int), &n);
-  if (g_.bits > 8) {
-    float norm = (float)(1u << (16 - g_.bits)) / 65535.0f;
-    ctx_->api.setKernelArg(kUnpack_, 3, sizeof(float), &norm);
-  }
-  size_t gsize = ((size_t)n + 63) / 64 * 64;
-  cl_int e = ctx_->api.enqueueNDRange(ctx_->queue, kUnpack_, 1, nullptr, &gsize, nullptr, 0,
-                                      nullptr, nullptr);
-  if (e != CL_SUCCESS) {
-    err_ = "unpack launch failed";
-    return false;
-  }
-  return true;
-}
-
-// Float plane -> raw bytes, matching PlaneRef::download.
-bool GpuRef::pack() {
-  int n = g_.width * g_.height;
-  ctx_->api.setKernelArg(kPack_, 0, sizeof(cl_mem), &bufOut_);
-  ctx_->api.setKernelArg(kPack_, 1, sizeof(cl_mem), &bufRaw_);
-  ctx_->api.setKernelArg(kPack_, 2, sizeof(int), &n);
-  if (g_.bits > 8) {
-    float invNorm = 1.0f / (float)(1u << (16 - g_.bits));
-    float maxPix = (float)((1u << g_.bits) - 1);
-    ctx_->api.setKernelArg(kPack_, 3, sizeof(float), &invNorm);
-    ctx_->api.setKernelArg(kPack_, 4, sizeof(float), &maxPix);
-  }
-  size_t gsize = ((size_t)n + 63) / 64 * 64;
-  cl_int e = ctx_->api.enqueueNDRange(ctx_->queue, kPack_, 1, nullptr, &gsize, nullptr, 0, nullptr,
-                                      nullptr);
-  if (e != CL_SUCCESS) {
-    err_ = "pack launch failed";
     return false;
   }
   return true;
@@ -367,8 +331,6 @@ bool GpuRef::forwardRaw(int fn, const void* raw, size_t bytes) {
     return false;
   }
   StageTime t(kFwd);
-  if (!unpack())
-    return false;
   return launchFwd(spec);
 }
 
@@ -444,6 +406,7 @@ bool GpuRef::runKernels(const std::vector<int>& window) {
     return false;
   }
   size_t gs2[2] = {(size_t)g_.width, (size_t)g_.height};
+  ctx_->api.setKernelArg(kSyn_, 1, sizeof(cl_mem), rawPath_ ? &bufRaw_ : &bufOut_);
   long long tSyn = timeEnabled() ? nowNs() : 0;
   e = ctx_->api.enqueueNDRange(ctx_->queue, kSyn_, 2, nullptr, gs2, nullptr, 0, nullptr, nullptr);
   if (tSyn) {
@@ -486,8 +449,6 @@ bool GpuRef::processRaw(const std::vector<int>& window, void* dst, size_t bytes)
       return false;
   }
   StageTime t(kReadback);
-  if (!pack())
-    return false;
   cl_int e = ctx_->api.enqueueReadBuffer(ctx_->queue, bufRaw_, CL_TRUE, 0, bytes, dst, 0, nullptr,
                                          nullptr);
   if (e != CL_SUCCESS) {

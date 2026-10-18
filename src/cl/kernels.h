@@ -11,6 +11,28 @@ inline const char* kKernelSource() {
 // ---- helpers ----------------------------------------------------------
 #define PI 3.14159265358979f
 
+// Pixel format of the plane the forward kernel reads and the synthesis writes,
+// fixed at compile time: 0 = float samples, 8 = 8-bit bytes, 16 = 16-bit
+// samples. Converting inside these two kernels removes the separate unpack and
+// pack passes (two launches and two full passes over eight million pixels per
+// 4K frame) and the 33 MB float plane they needed. The arithmetic is exactly
+// the one of the PlaneRef::upload/download oracle: same fp32 multiply, same
+// clamp order, floor() before the cast so the rounding does not depend on the
+// device's float-to-integer conversion mode.
+#if RAW == 8
+  #define IN_T uchar
+  #define OUT_T uchar
+  #define TO_FLOAT(v) ((float)(v) * (1.0f / 255.0f))
+#elif RAW == 16
+  #define IN_T ushort
+  #define OUT_T ushort
+  #define TO_FLOAT(v) ((float)(v) * norm)
+#else
+  #define IN_T float
+  #define OUT_T float
+  #define TO_FLOAT(v) (v)
+#endif
+
 inline int mirror_i(int x, int w) {
   int p = x % (2 * w);
   if (p < 0) p += 2 * w;
@@ -124,13 +146,13 @@ __kernel void fft1d_debug(__global const float* src, __global float2* dst, int n
 // ---- analysis + forward FFT ------------------------------------------
 // One work-group per block. Loads the windowed block (mirror addressing,
 // chroma centering), does the 2D forward FFT, stores the half-spectrum.
-__kernel void fft2d_fwd(__global const float* restrict plane,
+__kernel void fft2d_fwd(__global const IN_T* restrict plane,
                         __global const int* restrict bx,
                         __global const int* restrict by,
                         __global float2* restrict spec,
                         __global const float* restrict win,
                         int W, int H, int bw, int bh, int fbw, int nb,
-                        float chromaNorm) {
+                        float chromaNorm, float norm) {
   __local float2 L[LSZP]; // LSZP = (bw+1)*bh: the spare column (LP = bw+1) shifts
                           // every row by one element, which breaks the 32-way
                           // bank conflict the strided column FFTs used to hit
@@ -143,7 +165,7 @@ __kernel void fft2d_fwd(__global const float* restrict plane,
   int n = bw * bh;
   for (int idx = tid; idx < n; idx += wg) {
     int ly = idx / bw, lx = idx - ly * bw;
-    float v = plane[mirror_i(y0 + ly, H) * W + mirror_i(x0 + lx, W)];
+    float v = TO_FLOAT(plane[mirror_i(y0 + ly, H) * W + mirror_i(x0 + lx, W)]);
     v -= chromaNorm;
     L[ly * LP + lx] = (float2)(v * win[idx], 0.0f);
   }
@@ -393,10 +415,11 @@ __kernel void fft2d_inv(__global const float2* restrict spec,
 // One work-item per output pixel; sums the covering blocks (grid is
 // uniform: origin off + k*step, block size bw x bh).
 __kernel void synthesize(__global const float* restrict blocks,
-                         __global float* restrict out,
+                         __global OUT_T* restrict out,
                          int W, int H, int bw, int bh,
                          int xoff, int xstep, int yoff, int ystep,
-                         int ncols, int nrows, float chromaNorm) {
+                         int ncols, int nrows, float chromaNorm,
+                         float invNorm, float maxPix) {
   int x = get_global_id(0);
   int y = get_global_id(1);
   if (x >= W || y >= H) return;
@@ -418,47 +441,18 @@ __kernel void synthesize(__global const float* restrict blocks,
       sum += blocks[((long)m * ncols + n) * bw * bh + ly * bw + lx];
     }
   }
-  out[y * W + x] = sum + chromaNorm;
-}
-
-// Pixel conversion, done on the device so the host only has to copy bytes
-// instead of converting eight million pixels twice per frame. The maths matches
-// PlaneRef::upload/download exactly: same fp32 multiply, same clamp order, and
-// floor() before the cast so the rounding does not depend on the device's
-// float-to-integer conversion mode (a plain cast is round-to-nearest in OpenCL).
-__kernel void unpack_u8(__global const uchar* restrict raw, __global float* restrict plane,
-                        int n) {
-  int i = get_global_id(0);
-  if (i < n)
-    plane[i] = (float)raw[i] * (1.0f / 255.0f);
-}
-
-__kernel void unpack_u16(__global const ushort* restrict raw, __global float* restrict plane,
-                         int n, float norm) {
-  int i = get_global_id(0);
-  if (i < n)
-    plane[i] = (float)raw[i] * norm;
-}
-
-__kernel void pack_u8(__global const float* restrict plane, __global uchar* restrict raw,
-                      int n) {
-  int i = get_global_id(0);
-  if (i < n) {
-    float v = plane[i];
-    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-    raw[i] = (uchar)floor(v * 255.0f + 0.5f);
-  }
-}
-
-__kernel void pack_u16(__global const float* restrict plane, __global ushort* restrict raw,
-                       int n, float invNorm, float maxPix) {
-  int i = get_global_id(0);
-  if (i < n) {
-    float v = plane[i] * invNorm;
-    v = v < maxPix ? v : maxPix;
-    v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-    raw[i] = (ushort)floor(v * 65535.0f + 0.5f);
-  }
+  float v = sum + chromaNorm;
+#if RAW == 8
+  v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+  out[y * W + x] = (uchar)floor(v * 255.0f + 0.5f);
+#elif RAW == 16
+  v = v * invNorm;
+  v = v < maxPix ? v : maxPix;
+  v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+  out[y * W + x] = (ushort)floor(v * 65535.0f + 0.5f);
+#else
+  out[y * W + x] = v;
+#endif
 }
 )CL";
 }

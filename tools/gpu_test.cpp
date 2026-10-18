@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
   CHECK(e);
   char opts[256];
   snprintf(opts, sizeof(opts),
-           "-DLSZ=%d -DLSW=%d -DLP=%d -DLSZP=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d "
+           "-DLSZ=%d -DLSW=%d -DLP=%d -DLSZP=%d -DBM=%d -DDG=%d -DPAT=%d -DSHP=%d -DRAW=0 "
            "-cl-fp32-correctly-rounded-divide-sqrt",
            bw * bh, bw > bh ? bw : bh, bw + 1, (bw + 1) * bh, ip.bm, ip.degridOn ? 1 : 0,
            ip.usePattern ? 1 : 0, ip.sharpenOn ? 1 : 0);
@@ -156,6 +156,8 @@ int main(int argc, char** argv) {
   CHECK(gpu.api.setKernelArg(kFwd, 10, sizeof(int), &nb));
   float cn = cpu.chromaNorm();
   CHECK(gpu.api.setKernelArg(kFwd, 11, sizeof(float), &cn));
+  float one = 1.0f, zero = 0.0f; // norm/invNorm/maxPix: unused with float samples
+  CHECK(gpu.api.setKernelArg(kFwd, 12, sizeof(float), &one));
   gsize = (size_t)nb * wg;
   for (int f = 0; f < nframes; f++) {
     CHECK(gpu.api.setKernelArg(kFwd, 0, sizeof(cl_mem), &bufPlane[f]));
@@ -248,6 +250,8 @@ int main(int argc, char** argv) {
   CHECK(gpu.api.setKernelArg(kSyn, 10, sizeof(int), &ncols));
   CHECK(gpu.api.setKernelArg(kSyn, 11, sizeof(int), &nrows));
   CHECK(gpu.api.setKernelArg(kSyn, 12, sizeof(float), &cn));
+  CHECK(gpu.api.setKernelArg(kSyn, 13, sizeof(float), &one));
+  CHECK(gpu.api.setKernelArg(kSyn, 14, sizeof(float), &zero));
   size_t gs2[2] = {(size_t)W, (size_t)H};
   CHECK(gpu.api.enqueueNDRange(gpu.queue, kSyn, 2, nullptr, gs2, nullptr, 0, nullptr, nullptr));
   CHECK(gpu.api.finish(gpu.queue));
