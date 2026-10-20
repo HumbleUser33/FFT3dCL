@@ -403,3 +403,108 @@ Tried and dropped:
 - Moving `getFrameFilter` outside the instance mutex: it measures 0.00 ms with
   ffms2, because the decoder runs on its own threads, so there is nothing to
   overlap.
+
+## `bw=64` silently ran on the CPU (fixed)
+
+### Report
+
+A two-pass StaxRip setup on the real 4K HDR10 clip — pass 1
+`sigma=4.0, bt=4, bw=64, bh=64, ow=32, oh=32, mode=1, sharpen=0.6, plane=4,
+device=1`, pass 2 `sigma=1.5, bt=3, bw=32, ow=16, plane=0, sharpen=0.6` — ran at
+0.17 to 0.23 frames per second, and StaxRip appeared to take five minutes to
+"start". The same graph with `bw=32` ran at 4.5 fps.
+
+### Root cause
+
+`src/cl/kernels.h` contained a leftover single-row debug kernel, `fft1d_debug`,
+with two `__local float2` arrays of `LSZ` entries. All kernels in that file are
+compiled as one program, so the local memory of *every* kernel counts against the
+device limit at *every* block size: at `bw=64` that kernel alone asked for 64 KiB
+of static local memory where the device allows 48 KiB.
+
+```
+ptxas error : Entry function 'fft1d_debug' uses too much shared data
+              (0x10008 bytes, 0xc000 max)
+```
+
+The program build failed, `GpuRef` reported `ok() == false`, and the plugin set
+`useGpu = false` without reading `GpuRef::error()` and without logging anything —
+even with `device=1`, which is documented as "GPU required". So every `bw=64`
+run since the beginning of the port had been running on the CPU reference, about
+twenty times slower. The five-minute "startup" was StaxRip rendering frames at
+0.2 fps: evaluating the script and creating the four filter instances measures
+0.90 s.
+
+### Fix
+
+1. The debug kernel is deleted, with a comment in its place explaining that no
+   diagnostic kernel belongs in that file, because its local memory would apply
+   to every block size.
+2. A GPU setup failure is now loud: `device=1` raises a VapourSynth error naming
+   the reason, `device=2` logs a warning with the reason and then uses the CPU.
+   The same applies to a failure in the middle of a run (`device=1` fails the
+   frame instead of quietly switching engines).
+3. `GpuRef::retireSpectra` released a buffer without subtracting its size from
+   the running total, so the `N MiB of device buffers` log over-reported (1694
+   MiB shown for 1113 MiB actually live). It now subtracts.
+
+### Verification
+
+Behaviour matrix, 4K HDR10 clip, one frame, new build:
+
+| Request | Result |
+|---|---|
+| `bw=32, device=1` | GPU, 281 MiB |
+| `bw=64, device=1` | GPU, 287 MiB (was: CPU, 0 MiB) |
+| `bw=64, plane=4, device=1` | GPU, 3 instances, 437 MiB before any frame |
+| `bw=128, device=1` | error: `block too large for device local memory (max 64x64)` |
+| `bw=128, device=2` | same text as a warning, then the CPU path |
+
+`bw=128` is a legitimate rejection: its inverse FFT kernel needs 131 KiB of local
+memory. The guard that reports it is unchanged.
+
+Pixels, `tools/ab_dll.ps1`, v1.1.0 build against this build, 12 frames of the 4K
+clip:
+
+| Settings | Identical samples | Max diff |
+|---|---|---|
+| `bw=32, plane=0` (the path that already worked) | 74 649 600 / 74 649 600 (100.00 %) | 0 |
+| `bw=64, plane=4` (CPU before, GPU now) | 74 648 653 / 74 649 600 (100.00 %) | 1 |
+
+Fidelity against the original FFT3dGPU 0.8.6 is unchanged, which also confirms
+the newly enabled 64x64 GPU path agrees with the CPU reference: 97.14 % (default,
+max 1), 93.54 % (`bw=64, bh=64, ow=32, oh=32`, max 2), 81.47 % (the pass-1
+settings above, max 2) — the same three numbers as before the change. At 10 bit
+the same checks give 94.83 % (default, max 4) and 80.62 % (`bw=64`, max 5); the
+`bw=64` gap is a property of the algorithm at that block size, present in the CPU
+reference as well, not of the GPU path.
+
+Speed, the exact two-pass graph, 10 frames, one request at a time, both builds
+back to back in the same session:
+
+| Build | Wall | Speed | Log line at creation |
+|---|---|---|---|
+| v1.1.0 as installed | 58.14 s | 0.17 fps | `0 GPU instance(s) alive, 0 MiB` |
+| this build | 2.90 s | 3.45 fps | `3 GPU instance(s) alive, 437 MiB` |
+
+An earlier pair of runs measured 43.1 s against 2.19 s; the ratio is the point,
+not the absolute value. Decode only, same 10 frames: 2.43 s.
+
+`bw=32` and `bw=64` run at the same speed (4.52 against 4.56 fps on the pass-1
+graph) and hold the same amount of graphics memory, because with half-block
+overlap twice as many blocks means half as much data per block. `bw=32` also
+stays closer to the original at 10 bit, so it remains the recommended setting.
+
+Real device memory of the two-pass graph, with the counter corrected: pass 1 luma
+`bw=64` 1113 MiB (287 MiB of fixed buffers plus 6 spectra buffers of 137.6 MiB),
+pass 1 U and V 291 MiB each, pass 2 luma `bw=32` 964 MiB — 2659 MiB for the
+graph, with the whole system peaking at 5376 to 5507 MiB on a 6144 MiB card.
+A 6 GB card is enough for this graph; an 8 GB card has clear margin.
+
+Portability note: 64x64 blocks need 34.3 KiB of local memory per work-group.
+Discrete NVIDIA, AMD and Intel Arc cards allow at least 48 KiB (NVIDIA 48 KiB
+static, more with dynamic allocation), but some integrated Intel GPUs cap static
+local memory at 32 KiB and will reject `bw=64`. With `device=2` they now get a
+warning naming the limit and keep working on the CPU; with `device=1` the script
+stops with the same text instead of running slowly.
+

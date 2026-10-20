@@ -128,20 +128,12 @@ void fft_batch(__local float2* restrict L, int R, int rowPitch, int stride, int 
   }
 }
 
-// ---- debug: single-row FFT -------------------------------------------
-__kernel void fft1d_debug(__global const float* src, __global float2* dst, int n) {
-  __local float2 L[LSZ];
-  __local float2 WT[LSZ];
-  int tid = get_local_id(0);
-  int wg = get_local_size(0);
-  for (int i = tid; i < n; i += wg)
-    L[i] = (float2)(src[i], 0.0f);
-  tw_fill(WT, n, -1, tid, wg);
-  barrier(CLK_LOCAL_MEM_FENCE);
-  fft_batch(L, 1, 0, 1, n, -1, tid, wg, WT);
-  for (int i = tid; i < n; i += wg)
-    dst[i] = L[i];
-}
+// No debug/diagnostic kernels here on purpose: all kernels in this file are
+// compiled into one program, so the local memory of *every* kernel counts
+// against the device limit at *every* block size. A single-row debug kernel
+// holding two bw*bh arrays used to make the whole build fail for bw=64
+// (64 KB of static local memory, 48 KB available) and silently forced the
+// filter onto the CPU path.
 
 // ---- analysis + forward FFT ------------------------------------------
 // One work-group per block. Loads the windowed block (mirror addressing,

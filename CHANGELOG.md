@@ -1,5 +1,68 @@
 # Changelog
 
+## v1.1.1 — 2026-10-20
+
+One setting, `bw=64`, was quietly running on the processor instead of the
+graphics card, about twenty times slower. It now runs on the card. The pictures
+are exactly the same as before.
+
+### Fixed
+
+- **`bw=64` really uses the graphics card now.** A leftover test program made the
+  graphics code fail to build at that block size, and the filter then fell back
+  to the processor without saying so.
+- **The memory log counted too much.** Buffers that had already been given back
+  were not subtracted, so the log reported 1694 MiB where 1113 MiB were in use.
+
+### Changed
+
+- **A graphics problem is reported instead of hidden.** With `device=1` the
+  script stops and names the reason; with `device=2` a warning names the reason
+  before the filter continues on the processor.
+- **The README gives the real numbers**: how much graphics memory each filter
+  holds on 4K material, and which block sizes a card can accept (64x64 needs
+  34.3 KiB of on-chip memory, which some integrated Intel GPUs do not have).
+
+### Speed
+
+10 frames of a real 4K HDR10 clip (3840x2160, 10 bit), two filters in a row,
+pass 1 with `plane=4, bw=64`, pass 2 with `plane=0, bw=32`, same machine:
+
+| | v1.1.0 | v1.1.1 |
+|---|---|---|
+| time for the 10 frames | 58.1 s | 2.9 s |
+| speed | 0.17 frames per second | 3.5 frames per second |
+| filters running on the graphics card | 0 of 4 | 4 of 4 |
+
+A repeat run measured 2.4 s. Decoding the same clip without any filter takes
+2.4 s, so the denoising now costs about what decoding costs.
+
+### Memory
+
+Graphics memory held by the filter on 4K material, measured per filter:
+
+| Filter | Graphics memory |
+|---|---|
+| one luma filter, `bt=3, bw=32` | 964 MiB |
+| one luma filter, `bt=4, bw=64` | 1113 MiB |
+| one chroma plane (U or V) | 291 MiB |
+| one filter with `plane=4` (luma + U + V) | 1695 MiB |
+| two filters in a row (`plane=4`, then luma) | 2659 MiB |
+
+`bw=64` costs about the same as `bw=32`, in memory as in speed: with half-block
+overlap, twice as many blocks means half as much data per block. Everything is
+given back when the filter is destroyed.
+
+### The pictures did not change
+
+- Settings that already worked: 74 649 600 samples of 74 649 600 identical,
+  maximum difference 0.
+- `bw=64` (processor before, graphics card now): 100.00 % identical, maximum
+  difference 1.
+- Against the original FFT3dGPU 0.8.6: 97.14 % at the default settings, 94.83 %
+  at 10 bit, 93.54 % at `bw=64` — the same numbers as before. Details in
+  [`docs/validation-staxrip.md`](docs/validation-staxrip.md).
+
 ## v1.1.0 — 2026-10-18
 
 Same pictures and the same parameters, but about twice as fast and noticeably

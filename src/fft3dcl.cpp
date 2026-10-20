@@ -18,6 +18,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 using namespace fft3dcl;
@@ -41,6 +42,7 @@ struct FilterInstance {
   VSNode* clip = nullptr; // borrowed, owned by the graph
 
   bool useGpu = false;
+  int device = 2; // 0 = CPU reference, 1 = GPU required, 2 = GPU with CPU fallback
   std::vector<int> processedPlanes;
   std::vector<PlaneGeom> geoms;      // per processed plane
   std::vector<InternalParams> ips;   // per processed plane
@@ -62,16 +64,10 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
                                       const VSAPI* vsapi);
 void VS_CC fft3dclFree(void* instanceData, VSCore* core, const VSAPI* vsapi);
 
-// One line per filter instance so a log can separate a real leak (instances
-// piling up) from the driver holding on to memory that was released correctly.
-void logGpuUsage(VSCore* core, const VSAPI* vsapi, const char* what) {
-  char msg[160];
-  snprintf(msg, sizeof(msg), "FFT3DCL: %s - %d GPU instance(s) alive, %.0f MiB of device buffers",
-           what, GpuRef::liveInstances(), (double)GpuRef::liveBytes() / 1048576.0);
-  vsapi->logMessage(mtInformation, msg, core);
-  // Some hosts swallow the VapourSynth log. Setting FFT3DCL_LOG to a file path
-  // writes the same line there, which is how the memory behaviour in StaxRip was
-  // traced.
+// Same line to the VapourSynth log and, when FFT3DCL_LOG points at a file, to
+// that file: some hosts (StaxRip included) only show part of the core log.
+void logMsg(VSCore* core, const VSAPI* vsapi, VSMessageType type, const char* msg) {
+  vsapi->logMessage(type, msg, core);
   const char* trace = getenv("FFT3DCL_LOG");
   if (trace && *trace) {
     if (FILE* f = fopen(trace, "a")) {
@@ -82,6 +78,44 @@ void logGpuUsage(VSCore* core, const VSAPI* vsapi, const char* what) {
       fclose(f);
     }
   }
+}
+
+// One line per filter instance so a log can separate a real leak (instances
+// piling up) from the driver holding on to memory that was released correctly.
+void logGpuUsage(VSCore* core, const VSAPI* vsapi, const char* what) {
+  char msg[160];
+  snprintf(msg, sizeof(msg), "FFT3DCL: %s - %d GPU instance(s) alive, %.0f MiB of device buffers",
+           what, GpuRef::liveInstances(), (double)GpuRef::liveBytes() / 1048576.0);
+  logMsg(core, vsapi, mtInformation, msg);
+}
+
+// The GPU path gave up at run time. With device=1 the frame request fails with
+// the driver's reason instead of quietly running on the CPU reference at a
+// twentieth of the speed; with device=2 the filter keeps working and says why,
+// once per instance. Returns true when the frame request must be aborted.
+bool gpuGaveUp(FilterInstance* inst, const std::string& where, VSCore* core, const VSAPI* vsapi,
+               VSFrameContext* frameCtx) {
+  inst->useGpu = false;
+  std::string why;
+  for (auto& g : inst->gpus) {
+    if (g && !g->error().empty()) {
+      why = g->error();
+      break;
+    }
+  }
+  std::string msg = "FFT3DCL: GPU processing failed at " + where;
+  if (!why.empty())
+    msg += ": " + why;
+  if (inst->device == 1) {
+    vsapi->setFilterError((msg + " (device=1 asks for the GPU, so there is no CPU fallback)").c_str(),
+                          frameCtx);
+    return true;
+  }
+  if (!inst->gpuWarned) {
+    inst->gpuWarned = true;
+    logMsg(core, vsapi, mtWarning, (msg + ", continuing on the CPU path").c_str());
+  }
+  return false;
 }
 
 // ---- create ---------------------------------------------------------------
@@ -194,6 +228,7 @@ void VS_CC fft3dclCreate(const VSMap* in, VSMap* out, void* userData, VSCore* co
   inst->sp = sp;
   inst->vi = *srcvi;
   inst->clip = clip;
+  inst->device = device;
 
   if (device != 0) {
     std::call_once(g_gpuOnce, initGpuOnce);
@@ -222,16 +257,29 @@ void VS_CC fft3dclCreate(const VSMap* in, VSMap* out, void* userData, VSCore* co
     inst->degridDone.push_back(false);
   }
   if (inst->useGpu) {
+    std::string why;
     for (size_t k = 0; k < inst->refs.size(); k++) {
       auto gpu = std::make_unique<GpuRef>(g_gpu, inst->ips[k], inst->geoms[k], *inst->refs[k]);
       if (!gpu->ok()) {
-        inst->useGpu = false; // fall back to CPU for the whole instance
+        why = gpu->error();
         break;
       }
       inst->gpus.push_back(std::move(gpu));
     }
-    if (!inst->useGpu)
+    if (!why.empty()) {
+      // A GPU setup failure used to be silent: the filter then ran on the CPU
+      // reference at a twentieth of the speed, with nothing in the log. device=1
+      // means "GPU only", so it has to fail loudly; device=2 keeps the CPU
+      // fallback but says why it took it.
       inst->gpus.clear();
+      inst->useGpu = false;
+      std::string msg = "FFT3DCL: GPU setup failed: " + why;
+      if (device == 1) {
+        vsapi->mapSetError(out, msg.c_str());
+        return;
+      }
+      logMsg(core, vsapi, mtWarning, msg.c_str());
+    }
   }
   inst->processedPlanes = planes;
 
@@ -327,8 +375,13 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
     // Degrid: gridsample pattern built once (white-frame FFT, no source frame).
     if (ip.degridOn && !inst->degridDone[k]) {
       ref.buildDegridSample();
-      if (inst->useGpu && !inst->gpus[k]->uploadDegridSample(ref))
-        inst->useGpu = false; // fall back to CPU
+      if (inst->useGpu && !inst->gpus[k]->uploadDegridSample(ref)) {
+        if (gpuGaveUp(inst, "the degrid sample upload", core, vsapi, frameCtx)) {
+          vsapi->freeFrame(dst);
+          vsapi->freeFrame(src);
+          return nullptr;
+        }
+      }
       inst->degridDone[k] = true;
     }
 
@@ -394,15 +447,12 @@ const VSFrame* VS_CC fft3dclGetFrame(int n, int activationReason, void* instance
           ref.download(inst->outBuf, vsapi->getWritePtr(dst, p), vsapi->getStride(dst, p));
       }
       if (!done) {
-        // Driver/OOM failure: disable GPU and fall through to the CPU path.
-        inst->useGpu = false;
-        if (!inst->gpuWarned) {
-          inst->gpuWarned = true;
-          char msg[128];
-          snprintf(msg, sizeof(msg),
-                   "FFT3DCL: OpenCL processing failed at frame %d, continuing on the CPU path", n);
-          vsapi->logMessage(mtWarning, msg, core);
+        if (gpuGaveUp(inst, "frame " + std::to_string(n), core, vsapi, frameCtx)) {
+          vsapi->freeFrame(dst);
+          vsapi->freeFrame(src);
+          return nullptr;
         }
+        // device=2: the GPU is off for this instance, fall through to the CPU path.
       } else {
         StageTime t(kPrune);
         if (ip.bm >= 2) {

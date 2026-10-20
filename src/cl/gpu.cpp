@@ -295,8 +295,14 @@ void GpuRef::retireSpectra(cl_mem m) {
   const size_t one = sizeof(float) * 2 * (size_t)nb_ * planeSize_;
   if (specPool_.size() * one + one <= budget)
     specPool_.push_back(m);
-  else
+  else {
     ctx_->api.releaseMemObject(m);
+    // The running total has to follow the release, otherwise the "N MiB of
+    // device buffers" line counts buffers the driver already gave back and
+    // over-states the footprint (it did: 1694 MiB reported for 1113 MiB live).
+    bytes_ -= one;
+    g_bytes -= one;
+  }
 }
 
 bool GpuRef::launchFwd(cl_mem spec) {

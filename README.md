@@ -74,7 +74,8 @@ clip = core.fft3dcl.FFT3DCL(
                     # 2 current+previous, 3 prev+current+next, 4 two prev+current+next
     plane=0,        # 0 = luma, 1 = chroma, 4 = all
     mode=1,         # 0 = 1:1 blocks, 1 = half-block overlap (uses ow/oh), 2 = not ported
-    bw=32, bh=32,   # block size, power of two, 4..512 (other values round down)
+    bw=32, bh=32,   # block size, power of two, 4..512 (the GPU path stops where the
+                    # card's on-chip memory stops: 64x64 needs 34.3 KiB)
     ow=16, oh=16,   # block overlap, mode 1 only, must be even, at most bw/2 and bh/2
     degrid=1.0,     # block-grid removal, mode 1 only (default 1.0 in mode 1, else 0)
     sharpen=0.0,    # positive sharpens, negative blurs, applied in the frequency domain
@@ -105,6 +106,13 @@ One parameter specific to this port, **with no effect on the denoising**:
 | `1` | GPU required (error if unavailable) |
 | `0` | CPU reference |
 
+A GPU that cannot be used is never silent: with `device=1` the filter stops with
+the reason, with `device=2` it logs a warning naming the reason and then runs on
+the CPU. The largest block size the GPU path accepts depends on the card: the
+kernels need `bw*bh` values in fast on-chip memory, so 64x64 needs 34.3 KiB and
+some integrated Intel cards (32 KiB limit) will refuse it while a discrete card
+accepts it.
+
 Accepted formats: 8 to 16-bit integer and 32-bit float, greyscale or planar YUV
 (10-bit HDR10 works).
 
@@ -118,6 +126,35 @@ The full contract, with the exact clamping rules of the original, is in
 Measured on an RTX 3050: the GPU path is about **5× faster** than the CPU path
 (1280×720 float: 1.02 s on GPU vs 5.49 s on CPU). Full-frame 4K fits in 8 GB of
 video memory.
+
+Real 4K HDR10 material (3840x2160, 10 bit), `sigma=3, bt=4, bw=32, ow=16,
+sharpen=0.4`: **14.3 frames per second**, of which the graphics card uses 24.9 ms
+per frame and the processor 43 ms. Full numbers, and the breakdown of where the
+time goes, are in [`CHANGELOG.md`](CHANGELOG.md) and
+[`docs/validation-staxrip.md`](docs/validation-staxrip.md).
+
+---
+
+## Memory
+
+The GPU path keeps the frequency data of the frames in the current temporal
+window, one buffer per frame, per plane, per filter instance. Measured on 4K
+10-bit material:
+
+| Filter | Graphics memory held |
+|---|---|
+| one luma filter, `bt=3, bw=32` | 964 MiB |
+| one luma filter, `bt=4, bw=64` | 1113 MiB |
+| one chroma filter (U or V) | 291 MiB |
+| `plane=4` (luma + U + V) in one filter | 1695 MiB |
+| two chained filters (pass 1 `plane=4`, pass 2 luma) | 2659 MiB |
+
+A block size of 64 costs about the same as 32: with half-block overlap, twice as
+many blocks means half as much data per block. Everything is released when the
+filter instance is destroyed; if the graphics memory of the PC does not come back
+down, it is the driver or the host application holding it, not this filter. Set
+`FFT3DCL_LOG` to a file path to see one line per instance created and destroyed,
+with the memory of the live instances.
 
 ---
 
